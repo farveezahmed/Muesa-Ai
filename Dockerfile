@@ -19,4 +19,4 @@ ENV PORT=8080
 EXPOSE 8080
 
 # The command to start MUESA
-CMD ["python", "muesa_scanner.py"]
+CMD ["python", "-u", "muesa_scanner.py"]
