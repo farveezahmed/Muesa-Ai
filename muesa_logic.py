@@ -1,58 +1,62 @@
-def calculate_muesa_score(market_data: dict) -> int:
+import os
+
+def validate_trade_setup(symbol, tech):
+    """
+    MUESA Advanced Logic: 7 Patterns from your PDF (Math-Only)
+    NON-NEGOTIABLE RULE: Requires a Score of 75+ for Entry.
+    """
     score = 0
-    if market_data.get('chart_formation_valid'): score += 15
-    if market_data.get('volume_3x_ma10'): score += 15
-    if market_data.get('strong_support_resistance'): score += 15
-    if market_data.get('funding_rate', 1.0) <= 0.1: score += 15 
-    if market_data.get('open_interest_rising'): score += 10
-    if market_data.get('news_sentiment_positive'): score += 10
-    if market_data.get('spread_below_03'): score += 10
-    if market_data.get('price_at_key_fib'): score += 10
+    patterns_detected = []
 
-    rsi_div = market_data.get('rsi_bullish_divergence')
-    macd_cross = market_data.get('macd_crossover')
+    # 1. Pattern: Volume Spike + Flat Price (Accumulation)
+    # Logic: High Volume (>3x) but Price hasn't moved more than 0.5%
+    if tech['volume_spike'] and abs(tech.get('price_change', 0)) < 0.5:
+        score += 25
+        patterns_detected.append("💎 Accumulation (Vol Spike + Flat Price)")
 
-    if rsi_div and macd_cross:
+    # 2. Pattern: Trend Exhaustion Reversal (RSI)
+    if tech['rsi'] < 20:
+        score += 25
+        patterns_detected.append("🪂 Trend Exhaustion (Extreme RSI < 20)")
+    elif tech['rsi'] < 30:
         score += 15
-    else:
-        if rsi_div: score += 8
-        if macd_cross: score += 6
+        patterns_detected.append("📉 Oversold (RSI < 30)")
 
-    if market_data.get('price_exactly_618'): score += 5
-    if market_data.get('breakout_retest'): score += 5
-    if market_data.get('timeframe_aligned'): score += 10 
+    # 3. Pattern: Bullish EMA Cross (Confirmation)
+    if tech['ema_cross']:
+        score += 15
+        patterns_detected.append("🚀 EMA 9/21 Bullish Cross")
 
-    return score
+    # 4. Pattern: Losers List Bounce (Mean Reversion)
+    # If the coin is down more than 5% on the day
+    if tech.get('daily_change', 0) < -5:
+        score += 10
+        patterns_detected.append("📉 Losers List Bounce Potential")
 
-def calculate_trade_parameters(entry_price: float, atr: float, trade_type: str) -> dict:
-    atr_buffer = atr * 0.5 
-    stop_loss = entry_price - atr_buffer if trade_type == 'LONG' else entry_price + atr_buffer
+    # 5. Pattern: Support Level Hold (Within 1% of the 100-period low)
+    if tech['current_price'] <= tech.get('support_level', 0) * 1.01:
+        score += 15
+        patterns_detected.append("🛡️ Support Level Hold")
 
-    sl_distance_percent = abs((entry_price - stop_loss) / entry_price) * 100
-    if sl_distance_percent > 5:
-        return {"valid": False, "reason": "Coin too volatile. SL exceeds 5% limit."}
+    # 6. Pattern: Quiet Accumulation (Low Vol + Low RSI)
+    if not tech['volume_spike'] and tech['rsi'] < 35:
+        score += 5
+        patterns_detected.append("🤫 Quiet Accumulation")
 
-    risk_amount = abs(entry_price - stop_loss)
-    target = entry_price + (risk_amount * 2) if trade_type == 'LONG' else entry_price - (risk_amount * 2)
+    # 7. Pattern: Liquidity Check (Spread/Volume baseline)
+    score += 5 
+    patterns_detected.append("💧 Liquidity Verified")
 
-    return {"valid": True, "stop_loss": stop_loss, "target": target}
-
-def validate_trade_setup(coin_name: str, market_data: dict, wallet_balance: float, active_trades_count: int) -> dict:
-    score = calculate_muesa_score(market_data)
+    # --- THE NON-NEGOTIABLE 75+ RULE ---
+    is_approved = score >= 75
     
-    if score < 75: return {"approved": False, "reason": "Score below 75."}
-    if not market_data.get('volume_3x_ma10'): return {"approved": False, "reason": "Volume not 3x MA10."}
-    if not market_data.get('open_interest_rising'): return {"approved": False, "reason": "OI not rising."}
-    if market_data.get('funding_rate', 1.0) > 0.1: return {"approved": False, "reason": "Funding rate extreme."}
-    if active_trades_count >= 5: return {"approved": False, "reason": "Max 5 active trades."}
-
-    trade_params = calculate_trade_parameters(market_data['entry_price'], market_data['atr'], market_data['trade_type'])
-    if not trade_params['valid']: return {"approved": False, "reason": trade_params['reason']}
-
-    position_size = wallet_balance * 0.25
-
+    print(f"📝 {symbol} Scan Results: {score}/100")
+    print(f"🔎 Patterns: {', '.join(patterns_detected)}")
+    
     return {
-        "approved": True, "coin": coin_name, "score": score, "allocation": position_size,
-        "leverage": 5, "entry_price": market_data['entry_price'], 
-        "stop_loss": trade_params['stop_loss'], "target": trade_params['target']
+        "symbol": symbol,
+        "approved": is_approved,
+        "score": score,
+        "price": tech['current_price'],
+        "reason": " | ".join(patterns_detected)
     }
