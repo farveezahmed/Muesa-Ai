@@ -47,4 +47,8 @@ if __name__ == "__main__":
     while True:
         scan_markets()
         print("Scan complete. MUESA is resting for 15 minutes...")
-        time.sleep(900)
+        # We loop 15 times, sleeping 60 seconds each time, 
+        # so Railway sees activity every minute.
+        for i in range(15):
+            time.sleep(60) 
+            print(f"Heartbeat: MUESA is watchful... ({15-i} mins left)")
