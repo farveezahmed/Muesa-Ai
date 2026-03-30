@@ -81,7 +81,7 @@ def scan_markets():
 
             if decision["approved"]:
                 print(f"🟢 75+ SCORE DETECTED! (Score: {decision['score']})")
-                # muesa_trader.execute_trade(decision) # STILL LOCKED FOR TESTING
+                muesa_trader.execute_trade(decision)
             else:
                 print(f"🔴 SKIP: {decision['reason']}")
 
