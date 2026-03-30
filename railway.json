@@ -4,8 +4,6 @@
     "builder": "DOCKER"
   },
   "deploy": {
-    "restartPolicyType": "ALWAYS",
-    "healthcheckPath": "/",
-    "healthcheckTimeout": 300
+    "restartPolicyType": "ALWAYS"
   }
 }
