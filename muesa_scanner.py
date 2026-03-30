@@ -31,23 +31,42 @@ def send_muesa_alert(message):
     except Exception as e:
         print(f"⚠️ Telegram Connection Failed: {e}")
 
-# --- 3. The Scanner Logic ---
-from muesa_logic import validate_trade_setup
-
+# --- 3. Indicators Logic ---
 def get_live_indicators(exchange, symbol):
     bars = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    
+    # RSI Calculation
     delta = df['close'].diff()
-    gain, loss = (delta.where(delta > 0, 0)).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rsi = 100 - (100 / (1 + (gain / loss)))
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume Spike (3x average)
     vol_spike = df['volume'].iloc[-1] > (df['volume'].rolling(10).mean().iloc[-1] * 3)
-    ema9, ema21 = df['close'].ewm(span=9).mean().iloc[-1], df['close'].ewm(span=21).mean().iloc[-1]
-    return {"rsi": rsi.iloc[-1], "volume_spike": vol_spike, "ema_cross": ema9 > ema21, "current_price": df['close'].iloc[-1]}
+    
+    # EMA Cross (9 over 21)
+    ema9 = df['close'].ewm(span=9).mean().iloc[-1]
+    ema21 = df['close'].ewm(span=21).mean().iloc[-1]
+    
+    return {
+        "rsi": rsi.iloc[-1], 
+        "volume_spike": vol_spike, 
+        "ema_cross": ema9 > ema21, 
+        "current_price": df['close'].iloc[-1]
+    }
 
+# --- 4. The Brain (Scanning & Trading) ---
 def scan_markets():
     API_KEY = os.environ.get('BINANCE_API_KEY')
     API_SECRET = os.environ.get('BINANCE_SECRET_KEY')
-    exchange = ccxt.binance({'apiKey': API_KEY, 'secret': API_SECRET, 'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+    exchange = ccxt.binance({
+        'apiKey': API_KEY, 
+        'secret': API_SECRET, 
+        'enableRateLimit': True, 
+        'options': {'defaultType': 'future'}
+    })
     
     WATCHLIST = ["BTC/USDT", "ETH/USDT", "VANRY/USDT", "SOL/USDT"]
     print(f"\n[{datetime.now()}] 🔍 MUESA Scanning Watchlist...")
@@ -55,28 +74,45 @@ def scan_markets():
     for symbol in WATCHLIST:
         try:
             tech = get_live_indicators(exchange, symbol)
-            # Shortened logic for the scan
             print(f"📊 {symbol} | Price: {tech['current_price']} | RSI: {tech['rsi']:.2f}")
             
+            # --- STEP 1: Telegram Alert for Oversold ---
             if tech['rsi'] < 30:
                 send_muesa_alert(f"⚠️ *OVERSOLD ALERT:* {symbol}\nPrice: {tech['current_price']}\nRSI: {tech['rsi']:.2f}")
+
+                # --- STEP 2: The Final Unlock (LIVE TRADING) ---
+                from muesa_logic import validate_trade_setup
+                import muesa_trader
+                
+                decision = validate_trade_setup(symbol, tech)
+                if decision["approved"]:
+                    print(f"✅ TRADE APPROVED for {symbol}! Executing...")
+                    send_muesa_alert(f"✅ *TRADE APPROVED:* {symbol}\nExecuting order on Binance...")
+                    muesa_trader.execute_trade(decision)
+                else:
+                    print(f"🔴 SKIP {symbol}: Score below 75.")
+                    
         except Exception as e:
             print(f"⚠️ Error scanning {symbol}: {e}")
 
+# --- 5. Main Execution Loop ---
 if __name__ == "__main__":
-    # Start Web Server in a separate thread IMMEDIATELY
+    # Start Keep-Alive Web Server
     t = Thread(target=run_web)
     t.daemon = True
     t.start()
     
-    # Small delay to let server boot
+    # Wait for server to boot
     time.sleep(5)
     
-    send_muesa_alert("🚀 *MUESA System Online and Watchful in Chennai!*")
+    # Initial System Check
+    send_muesa_alert("🚀 *MUESA Live Trading System Online!* Watching the markets 24/7.")
     
     while True:
         scan_markets()
         print("Scan complete. MUESA is resting for 15 minutes...")
+        
+        # 15-minute countdown with heartbeat logs
         for i in range(15):
             time.sleep(60)
             print(f"Heartbeat: MUESA is watchful... ({14-i} mins left)")
