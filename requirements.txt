@@ -2,3 +2,4 @@ ccxt
 anthropic
 python-dotenv
 pandas
+flask
