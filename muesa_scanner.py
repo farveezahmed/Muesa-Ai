@@ -88,11 +88,28 @@ def scan_markets():
         except Exception as e:
             print(f"⚠️ Error scanning {symbol}: {e}")
 
+from threading import Thread
+from flask import Flask
+
+# This creates a tiny "Fake Website" so Railway stays awake
+app = Flask(__name__)
+@app.route('/')
+def home(): return "MUESA IS WATCHFUL"
+
+def run_web():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
 if __name__ == "__main__":
-    print("MUESA Smart Scanner is LIVE.")
+    # Start the "Keep-Alive" website in the background
+    Thread(target=run_web).start()
+    
+    print("MUESA Smart Scanner is LIVE and Always Awake.")
     while True:
         scan_markets()
         print("Scan complete. MUESA is resting for 15 minutes...")
+        for i in range(15):
+            time.sleep(60)
+            print(f"Heartbeat: MUESA is watchful... ({14-i} mins left)")
         for i in range(15):
             time.sleep(60)
             print(f"Heartbeat: MUESA is watchful... ({14-i} mins left)")
