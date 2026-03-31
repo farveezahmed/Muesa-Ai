@@ -1,6 +1,5 @@
-ccxt
-anthropic
-python-dotenv
+ccxt==4.2.59
 pandas
+numpy
 flask
-requests
+asyncio
