@@ -24,8 +24,8 @@ from datetime import datetime
 from muesa_logic import init_db, calculate_math_score, call_claude_ai, get_aggressive_targets, log_trade, log_ghost_trade
 
 # --- 🛠️ THE HARD-WIRE SECTION (Replace these with your keys!) ---
-API_KEY = "crLhZfjPUPKtSge5gmnQuU1LWFdTHVqG2ny18X3sslp1CHj6OK9xXVgVk6dzWcxD"
-SECRET_KEY = "kueCfUxKeraVLcj6AvCONJLVucBFhM3loPGfqIReLe3GwGAkPBTzkdXbl7RGoz1B"
+api_key = "crLhZfjPUPKtSge5gmnQuU1LWFdTHVqG2ny18X3sslp1CHj6OK9xXVgVk6dzWcxD"
+secert_key = "kueCfUxKeraVLcj6AvCONJLVucBFhM3loPGfqIReLe3GwGAkPBTzkdXbl7RGoz1B"
 # ----------------------------------------------------------------
 
 async def scan_market():
