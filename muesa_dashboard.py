@@ -17,7 +17,6 @@ HTML_TEMPLATE = """
         th, td { padding: 12px; border: 1px solid #334155; text-align: left; }
         th { background: #1e293b; color: #38bdf8; }
         .btn { padding: 10px 20px; background: #38bdf8; color: #0f172a; text-decoration: none; border-radius: 5px; font-weight: bold;}
-        .btn:hover { background: #7dd3fc; }
     </style>
 </head>
 <body>
