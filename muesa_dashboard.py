@@ -1,62 +1,48 @@
-from flask import Flask, render_template_string
-import sqlite3
 import os
+import asyncio
+import ccxt.pro as ccxt
+from flask import Flask
+import threading
 
+# --- DASHBOARD SETUP ---
 app = Flask(__name__)
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MUESA HQ</title>
-    <style>
-        body { background: #0d1117; color: #c9d1d9; font-family: sans-serif; padding: 15px; font-size: 18px; }
-        .stat { background: #161b22; padding: 10px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #30363d; display: flex; justify-content: space-between; }
-        h1 { color: #58a6ff; font-size: 24px; }
-        table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; margin-bottom: 30px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #30363d; }
-        th { background: #21262d; color: #58a6ff; font-size: 14px; }
-        .pill { padding: 4px 8px; border-radius: 6px; font-weight: bold; font-size: 12px; text-transform: uppercase; }
-        .long { background: #238636; color: white; }
-        .short { background: #da3633; color: white; }
-        .ghost-reason { color: #8b949e; font-size: 13px; font-style: italic; }
-    </style>
-</head>
-<body>
-    <h1>🛡️ MUESA AGGRESSIVE HQ</h1>
-    <div class="stat"><span>Wallet: <b>₹5,000</b></span><span>Mode: <b>SHORT & LONG</b></span></div>
-    <h3>🚀 Live Trades</h3>
-    <table>
-        <tr><th>Symbol</th><th>Side</th><th>Score</th></tr>
-        {% for trade in trades %}
-        <tr><td><b>{{ trade[2] }}</b></td><td><span class="pill {{ trade[3].lower() }}">{{ trade[3] }}</span></td><td>{{ trade[7] }}</td></tr>
-        {% else %}<tr><td colspan="3" style="text-align:center; padding:20px; color:#8b949e;">No trades yet...</td></tr>{% endfor %}
-    </table>
-    <h3>👻 Ghost List</h3>
-    <table>
-        <tr><th>Symbol</th><th>Score</th><th>Reason</th></tr>
-        {% for ghost in ghosts %}
-        <tr><td>{{ ghost[2] }}</td><td>{{ ghost[3] }}</td><td class="ghost-reason">{{ ghost[4] }}</td></tr>
-        {% else %}<tr><td colspan="3" style="text-align:center; padding:20px; color:#8b949e;">No rejections yet.</td></tr>{% endfor %}
-    </table>
-</body>
-</html>
-"""
+top_scores = {}
 
 @app.route('/')
 def dashboard():
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    try:
-        c.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 10")
-        trades = c.fetchall()
-        c.execute("SELECT * FROM ghost_trades ORDER BY id DESC LIMIT 15")
-        ghosts = c.fetchall()
-    except: trades, ghosts = [], []
-    finally: conn.close()
-    return render_template_string(HTML_TEMPLATE, trades=trades, ghosts=ghosts)
+    html = "<h1>🚀 MUESA LIVE DASHBOARD</h1><hr>"
+    html += "<h3>📡 Tracking Live Market...</h3>"
+    html += "<table border='1'><tr><th>Symbol</th><th>Last Price</th><th>AI Score</th></tr>"
+    for sym, data in sorted(top_scores.items(), key=lambda x: x[1]['score'], reverse=True)[:10]:
+        html += f"<tr><td>{sym}</td><td>{data['price']}</td><td><b>{data['score']}</b></td></tr>"
+    html += "</table>"
+    return html
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+# --- MUESA ENGINE ---
+async def scan_market_live():
+    global top_scores
+    exchange = ccxt.binance({'options': {'defaultType': 'future'}})
+    print("🚀 MUESA WEBSOCKET + DASHBOARD ONLINE")
+    
+    try:
+        while True:
+            tickers = await exchange.watch_tickers()
+            for symbol, data in tickers.items():
+                if symbol.endswith('/USDT:USDT'):
+                    # Dummy AI Calculation for the Dashboard
+                    score = (data['percentage'] + 5) * 10 
+                    top_scores[symbol] = {'price': data['last'], 'score': round(score, 2)}
+            await asyncio.sleep(1)
+    except Exception as e:
+        print(f"‼️ ERROR: {e}")
+    finally:
+        await exchange.close()
+
+if __name__ == "__main__":
+    # Start the Web Dashboard in a separate thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Start the Websocket Scanner
+    asyncio.run(scan_market_live())
