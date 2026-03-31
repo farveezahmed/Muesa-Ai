@@ -25,7 +25,7 @@ from muesa_logic import init_db, calculate_math_score, call_claude_ai, get_aggre
 
 # --- 🛠️ THE HARD-WIRE SECTION (Replace these with your keys!) ---
 apikey = "crLhZfjPUPKtSge5gmnQuU1LWFdTHVqG2ny18X3sslp1CHj6OK9xXVgVk6dzWcxD"
-secertkey = "kueCfUxKeraVLcj6AvCONJLVucBFhM3loPGfqIReLe3GwGAkPBTzkdXbl7RGoz1B"
+secert = "kueCfUxKeraVLcj6AvCONJLVucBFhM3loPGfqIReLe3GwGAkPBTzkdXbl7RGoz1B"
 # ----------------------------------------------------------------
 
 async def scan_market():
