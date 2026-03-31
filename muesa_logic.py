@@ -4,7 +4,6 @@ import sqlite3
 import time
 from datetime import datetime
 
-# --- DATABASE SETUP (Data Warehouse) ---
 def init_db():
     conn = sqlite3.connect('muesa_data.db')
     c = conn.cursor()
@@ -39,19 +38,17 @@ def check_cooldown(symbol):
     c.execute("SELECT cooldown_until FROM cooldowns WHERE symbol=?", (symbol,))
     result = c.fetchone()
     conn.close()
-    if result and time.time() < result[0]:
-        return True
+    if result and time.time() < result[0]: return True
     return False
 
 def set_cooldown(symbol):
-    cooldown_time = time.time() + (24 * 3600) # 24 Hours
+    cooldown_time = time.time() + (24 * 3600)
     conn = sqlite3.connect('muesa_data.db')
     c = conn.cursor()
     c.execute("REPLACE INTO cooldowns (symbol, cooldown_until) VALUES (?, ?)", (symbol, cooldown_time))
     conn.commit()
     conn.close()
 
-# --- MATH & INDICATORS ---
 def calculate_atr(df, period=14):
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
@@ -69,24 +66,17 @@ def calculate_rvol(df, period=20):
 
 def get_structural_sl(df, direction, atr):
     last_3 = df.tail(3)
-    if direction == 'long':
-        struct_low = last_3['low'].min()
-        return struct_low - atr
-    else:
-        struct_high = last_3['high'].max()
-        return struct_high + atr
+    if direction == 'long': return last_3['low'].min() - atr
+    else: return last_3['high'].max() + atr
 
 def calculate_math_score(df):
-    """Calculates base 60-point trigger using timeframe data."""
     score = 0
     direction = None
     rvol = calculate_rvol(df)
-    
     current_close = df['close'].iloc[-1]
     ema_9 = df['close'].ewm(span=9).mean().iloc[-1]
     ema_21 = df['close'].ewm(span=21).mean().iloc[-1]
 
-    # Trend Logic
     if current_close > ema_21 and ema_9 > ema_21:
         direction = 'long'
         score += 35 
@@ -94,11 +84,8 @@ def calculate_math_score(df):
         direction = 'short'
         score += 35
 
-    # Volume & RSI Points (Simplified for Master Code)
     if rvol >= 2.5: score += 25
-    
     return score, direction, rvol
 
 def call_claude_ai(symbol, timeframe, score):
-    """Placeholder for AI validation (adds the final 15 points to reach 75+)."""
     return score + 15
