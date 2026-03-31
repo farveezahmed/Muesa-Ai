@@ -1,54 +1,66 @@
-import ccxt.async_support as ccxt_async
+import os
 import asyncio
+import ccxt.async_support as ccxt
 import pandas as pd
-from muesa_logic import init_db, calculate_math_score, call_claude_ai, get_aggressive_targets, log_trade
 
-# PASTE YOUR KEYS HERE
-API_KEY = "YOUR_KEY"
-SECRET_KEY = "YOUR_SECRET"
+# 1. MECHANICAL SYNC: Pull keys from Railway Variables
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 async def scan_market():
-    init_db()
-    exchange = ccxt_async.binance({
-        'apiKey': API_KEY, 'secret': SECRET_KEY,
-        'options': {'defaultType': 'future', 'adjustForTimeDifference': True},
+    # Initialize Binance Futures
+    exchange = ccxt.binance({
+        'apiKey': API_KEY,
+        'secret': SECRET_KEY,
+        'options': {'defaultType': 'future'},
         'enableRateLimit': True
     })
 
-    print("🚀 MUESA FULL-MARKET HUNTER ONLINE")
-    
-    while True:
-        try:
-            # 1. Get every coin with volume > $15M
-            tickers = await exchange.fetch_tickers()
-            symbols = [s for s, t in tickers.items() if '/USDT' in s and t['quoteVolume'] > 15000000]
+    print(f"🚀 MUESA FULL-MARKET HUNTER ONLINE")
+    print(f"📡 DEBUG: Connecting with Key: {str(API_KEY)[:5]}...")
+
+    try:
+        while True:
+            # Load all USDT Markets
+            markets = await exchange.load_markets()
+            symbols = [s for s in markets if s.endswith('/USDT')]
+            
             print(f"🔎 New Scan Started: Checking {len(symbols)} coins...")
 
             for symbol in symbols:
-                # 2. THE GOVERNOR: Wait 1.5 seconds so Binance doesn't ban us
-                await asyncio.sleep(1.5) 
-                
                 try:
-                    bars = await exchange.fetch_ohlcv(symbol, '15m', limit=50)
-                    df = pd.DataFrame(bars, columns=['t','open','high','low','close','volume'])
+                    # 2. THE GOVERNOR: Wait 1.5 seconds per coin to prevent "Teapot" ban
+                    await asyncio.sleep(1.5) 
                     
-                    score, side, rvol = calculate_math_score(df)
-                    if score >= 50 and rvol >= 1.5:
-                        final_score = call_claude_ai(symbol, '15m', score)
-                        
-                        if final_score >= 65:
-                            # [TRADE EXECUTION CODE GOES HERE - Use $15/5x leverage]
-                            print(f"🔥 OPPORTUNITY FOUND: {symbol} (Score: {final_score})")
-                            
-                except Exception:
-                    continue 
+                    # Fetch 15m Candles
+                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    
+                    last_price = df['close'].iloc[-1]
+                    volume = df['volume'].iloc[-1]
 
-            print("✅ Market Scan Complete. Resting for 2 minutes.")
-            await asyncio.sleep(120) 
-            
-        except Exception as e:
-            print(f"⚠️ Connection Error: {e}")
+                    # LOGIC: Check for your strategy (e.g., Volume Spike or RSI)
+                    # If score > 65: call_claude_ai(symbol) and place_trade(symbol)
+                    
+                    print(f"✅ Checked {symbol} | Price: {last_price} | Vol: {volume:.2f}")
+
+                except Exception as e:
+                    if "418" in str(e):
+                        print(f"⚠️ TEAPOT DETECTED! Increasing sleep to 5 seconds...")
+                        await asyncio.sleep(5)
+                    else:
+                        print(f"❌ Error checking {symbol}: {e}")
+                    continue
+
+            print("💤 Full scan complete. Resting for 1 minute...")
             await asyncio.sleep(60)
 
+    except Exception as e:
+        print(f"‼️ CRITICAL ERROR: {e}")
+    finally:
+        await exchange.close()
+
 if __name__ == "__main__":
+    # Ensure Python shows logs immediately
+    os.environ['PYTHONUNBUFFERED'] = '1'
     asyncio.run(scan_market())
