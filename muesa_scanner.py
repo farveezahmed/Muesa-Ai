@@ -1,66 +1,46 @@
 import os
 import asyncio
-import ccxt.async_support as ccxt
+import ccxt.pro as ccxt  # Note: This is the Pro version for Websockets
 import pandas as pd
 
-# 1. MECHANICAL SYNC: Pull keys from Railway Variables
+# 1. MECHANICAL SYNC
 API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-async def scan_market():
-    # Initialize Binance Futures
+async def scan_market_websocket():
+    # Initialize Binance Futures Websocket
     exchange = ccxt.binance({
         'apiKey': API_KEY,
         'secret': SECRET_KEY,
         'options': {'defaultType': 'future'},
-        'enableRateLimit': True
     })
 
-    print(f"🚀 MUESA FULL-MARKET HUNTER ONLINE")
-    print(f"📡 DEBUG: Connecting with Key: {str(API_KEY)[:5]}...")
+    print(f"🚀 MUESA WEBSOCKET ENGINE ONLINE")
+    print(f"📡 NO MORE RATE LIMITS - LISTENING LIVE")
 
     try:
+        # We listen to the "Ticker" stream for ALL coins at once
         while True:
-            # Load all USDT Markets
-            markets = await exchange.load_markets()
-            symbols = [s for s in markets if s.endswith('/USDT')]
+            # This opens ONE connection and Binance pushes ALL prices to us
+            tickers = await exchange.watch_tickers()
             
-            print(f"🔎 New Scan Started: Checking {len(symbols)} coins...")
-
-            for symbol in symbols:
-                try:
-                    # 2. THE GOVERNOR: Wait 1.5 seconds per coin to prevent "Teapot" ban
-                    await asyncio.sleep(1.5) 
+            for symbol, data in tickers.items():
+                if symbol.endswith('/USDT:USDT'): # Standard Futures format
+                    last_price = data['last']
+                    volume = data['quoteVolume'] # 24h Volume
                     
-                    # Fetch 15m Candles
-                    ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    # Logic: If price or volume spikes, MUESA triggers
+                    # Example: print(f"⚡ {symbol}: {last_price}")
                     
-                    last_price = df['close'].iloc[-1]
-                    volume = df['volume'].iloc[-1]
-
-                    # LOGIC: Check for your strategy (e.g., Volume Spike or RSI)
-                    # If score > 65: call_claude_ai(symbol) and place_trade(symbol)
-                    
-                    print(f"✅ Checked {symbol} | Price: {last_price} | Vol: {volume:.2f}")
-
-                except Exception as e:
-                    if "418" in str(e):
-                        print(f"⚠️ TEAPOT DETECTED! Increasing sleep to 5 seconds...")
-                        await asyncio.sleep(5)
-                    else:
-                        print(f"❌ Error checking {symbol}: {e}")
-                    continue
-
-            print("💤 Full scan complete. Resting for 1 minute...")
-            await asyncio.sleep(60)
+            # We only print a summary every 30 seconds so your logs stay clean
+            print(f"✅ Live Stream Active: Tracking {len(tickers)} symbols...")
+            await asyncio.sleep(30)
 
     except Exception as e:
-        print(f"‼️ CRITICAL ERROR: {e}")
+        print(f"‼️ WEBSOCKET ERROR: {e}")
     finally:
         await exchange.close()
 
 if __name__ == "__main__":
-    # Ensure Python shows logs immediately
     os.environ['PYTHONUNBUFFERED'] = '1'
-    asyncio.run(scan_market())
+    asyncio.run(scan_market_websocket())
