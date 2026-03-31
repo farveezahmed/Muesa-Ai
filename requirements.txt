@@ -1,7 +1,4 @@
-ccxt==4.2.59
-pandas
-numpy
-flask
-asyncio
-anthropic
-requests
+ccxt>=4.2.0
+pandas>=2.0.0
+asyncio>=3.4.3
+aiohttp>=3.9.0
