@@ -1,91 +1,39 @@
-import pandas as pd
-import numpy as np
-import sqlite3
-import time
-from datetime import datetime
-
-def init_db():
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS trade_history 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, direction TEXT, entry_price REAL, score INTEGER, rvol REAL, pnl REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS ghost_trades 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, score INTEGER, reason TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS cooldowns 
-                 (symbol TEXT PRIMARY KEY, cooldown_until REAL)''')
-    conn.commit()
-    conn.close()
-
-def log_trade(symbol, direction, entry_price, score, rvol, pnl=0.0):
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO trade_history (timestamp, symbol, direction, entry_price, score, rvol, pnl) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, direction, entry_price, score, rvol, pnl))
-    conn.commit()
-    conn.close()
-
-def log_ghost_trade(symbol, score, reason):
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO ghost_trades (timestamp, symbol, score, reason) VALUES (?, ?, ?, ?)",
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, score, reason))
-    conn.commit()
-    conn.close()
-
-def check_cooldown(symbol):
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    c.execute("SELECT cooldown_until FROM cooldowns WHERE symbol=?", (symbol,))
-    result = c.fetchone()
-    conn.close()
-    if result and time.time() < result[0]: return True
-    return False
-
-def set_cooldown(symbol):
-    cooldown_time = time.time() + (24 * 3600)
-    conn = sqlite3.connect('muesa_data.db')
-    c = conn.cursor()
-    c.execute("REPLACE INTO cooldowns (symbol, cooldown_until) VALUES (?, ?)", (symbol, cooldown_time))
-    conn.commit()
-    conn.close()
-
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    return true_range.rolling(period).mean().iloc[-1]
-
-def calculate_rvol(df, period=20):
-    if len(df) < period + 1: return 1.0
-    avg_vol = df['volume'].shift(1).rolling(period).mean().iloc[-1]
-    current_vol = df['volume'].iloc[-1]
-    if avg_vol == 0: return 1.0
-    return current_vol / avg_vol
-
-def get_structural_sl(df, direction, atr):
-    last_3 = df.tail(3)
-    if direction == 'long': return last_3['low'].min() - atr
-    else: return last_3['high'].max() + atr
-
-def calculate_math_score(df):
-    score = 0
-    direction = None
-    rvol = calculate_rvol(df)
-    current_close = df['close'].iloc[-1]
-    ema_9 = df['close'].ewm(span=9).mean().iloc[-1]
-    ema_21 = df['close'].ewm(span=21).mean().iloc[-1]
-
-    if current_close > ema_21 and ema_9 > ema_21:
-        direction = 'long'
-        score += 35 
-    elif current_close < ema_21 and ema_9 < ema_21:
-        direction = 'short'
-        score += 35
-
-    if rvol >= 2.5: score += 25
-    return score, direction, rvol
+import anthropic
+import os
 
 def call_claude_ai(symbol, timeframe, score):
-    return score + 15
+    """
+    The High-Performance AI Judge.
+    Uses Claude 3.5 Haiku to verify institutional patterns.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("⚠️ Claude API Key missing in Railway Variables!")
+        return score
+
+    client = anthropic.Anthropic(api_key=api_key)
+    
+    # We ask Claude to be the 'Final Judge'
+    prompt = (
+        f"Analyze {symbol} on the {timeframe} chart. Current Math Score: {score}. "
+        "Look for: 1. Liquidity Traps 2. Institutional Accumulation 3. RSI Divergence. "
+        "Is this a high-probability trade? Reply with ONLY a number between 0 and 20 "
+        "to add to the score. 0 = Dangerous/Trap, 20 = Perfect Institutional Alignment."
+    )
+
+    try:
+        # Using 3.5 Haiku for the best balance of cost and speed
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        # Extract the number from Claude's response
+        ai_points = int(''.join(filter(str.isdigit, response.content[0].text)))
+        print(f"🤖 Claude Analysis for {symbol}: +{ai_points} points")
+        return score + ai_points
+
+    except Exception as e:
+        print(f"❌ Claude API Error: {e}")
+        return score # If API fails, we fall back to the math score only
