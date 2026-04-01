@@ -1,19 +1,24 @@
+import os
+import threading
 import subprocess
 import sys
+from flask import Flask
 
-def main():
-    print("Starting MUESA Trading Engine...")
-    bot_process = subprocess.Popen([sys.executable, "muesa_scanner.py"])
-    
-    print("Starting MUESA Web Dashboard...")
-    web_process = subprocess.Popen([sys.executable, "muesa_dashboard.py"])
-    
-    try:
-        bot_process.wait()
-        web_process.wait()
-    except KeyboardInterrupt:
-        bot_process.terminate()
-        web_process.terminate()
+app = Flask(__name__)
+
+@app.route('/')
+def health():
+    return "MUESA ONLINE ✅", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    main()
+    # Start single Flask health check
+    threading.Thread(target=run_flask, daemon=True).start()
+    print("✅ MUESA Health Check Online")
+    
+    # Start scanner only
+    print("🚀 Starting MUESA Scanner...")
+    subprocess.Popen([sys.executable, "muesa_scanner.py"]).wait()
