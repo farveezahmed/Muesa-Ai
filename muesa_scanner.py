@@ -2,7 +2,6 @@ import os
 import time
 import asyncio
 import ccxt.pro as ccxt
-import ccxt as ccxt_sync
 import pandas as pd
 from datetime import datetime
 from muesa_logic import (
@@ -23,18 +22,20 @@ COIN_ANALYSIS_DELAY = 0.5 # Seconds to sleep between coin analyses
 # Structure: { (symbol, timeframe): (candles_list, fetched_at_timestamp) }
 _candle_cache: dict = {}
 
-def _fetch_ohlcv_cached(exchange, symbol: str, timeframe: str, limit: int) -> list:
+async def _fetch_ohlcv_cached(exchange, symbol: str, timeframe: str, limit: int) -> list:
     """
     Return cached OHLCV candles for (symbol, timeframe) if the cached copy is
-    younger than CACHE_TTL seconds.  Otherwise fetch fresh data from the
-    exchange, store it in the cache, and return it.
+    younger than CACHE_TTL seconds.  Otherwise subscribe via WebSocket using
+    watch_ohlcv(), store the result in the cache, and return it.
 
     Using a single fetch point for every timeframe means that even when
     check_1d_ema(), check_4h_1h_ema(), and get_15m_candles() all run for the
     same coin inside one scan cycle, only the first call per timeframe hits
-    the REST API — subsequent calls within the TTL window are served from
-    memory, cutting API traffic from 4 calls/coin down to 1 call/coin on
-    repeat scans.
+    the WebSocket — subsequent calls within the TTL window are served from
+    memory, cutting redundant WebSocket calls within the same scan cycle.
+
+    watch_ohlcv() has no REST rate limits, eliminating the risk of Binance
+    IP bans caused by high-frequency fetch_ohlcv() REST calls.
     """
     cache_key = (symbol, timeframe)
     now = time.monotonic()
@@ -46,20 +47,20 @@ def _fetch_ohlcv_cached(exchange, symbol: str, timeframe: str, limit: int) -> li
         if age < CACHE_TTL:
             return candles
 
-    # Cache miss or expired — fetch from exchange
-    candles = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    # Cache miss or expired — fetch via WebSocket (no REST rate limits)
+    candles = await exchange.watch_ohlcv(symbol, timeframe, limit=limit)
     _candle_cache[cache_key] = (candles, now)
     return candles
 
 # ─── EMA CHECKS ───────────────────────────────────────────────────────────────
-def check_1d_ema(exchange, symbol, direction):
+async def check_1d_ema(exchange, symbol, direction):
     """
     Check daily EMA alignment.  30 candles is sufficient to produce stable
     EMA-7, EMA-25, and EMA-99 tail values (pandas ewm uses all available rows
     regardless of span), and fetching fewer candles reduces payload size.
     """
     try:
-        candles = _fetch_ohlcv_cached(exchange, symbol, '1d', limit=30)
+        candles = await _fetch_ohlcv_cached(exchange, symbol, '1d', limit=30)
         df = pd.DataFrame(candles, columns=['time','open','high','low','close','volume'])
         ema7  = df['close'].ewm(span=7).mean().iloc[-1]
         ema25 = df['close'].ewm(span=25).mean().iloc[-1]
@@ -73,10 +74,10 @@ def check_1d_ema(exchange, symbol, direction):
         print(f"1D EMA error {symbol}: {e}")
         return False
 
-def check_4h_1h_ema(exchange, symbol, direction):
+async def check_4h_1h_ema(exchange, symbol, direction):
     try:
         for tf in ['4h', '1h']:
-            candles = _fetch_ohlcv_cached(exchange, symbol, tf, limit=30)
+            candles = await _fetch_ohlcv_cached(exchange, symbol, tf, limit=30)
             df = pd.DataFrame(candles, columns=['time','open','high','low','close','volume'])
             ema7  = df['close'].ewm(span=7).mean().iloc[-1]
             ema25 = df['close'].ewm(span=25).mean().iloc[-1]
@@ -90,9 +91,9 @@ def check_4h_1h_ema(exchange, symbol, direction):
         return False
 
 # ─── FETCH 15M CANDLES ────────────────────────────────────────────────────────
-def get_15m_candles(exchange, symbol):
+async def get_15m_candles(exchange, symbol):
     try:
-        candles = _fetch_ohlcv_cached(exchange, symbol, '15m', limit=100)
+        candles = await _fetch_ohlcv_cached(exchange, symbol, '15m', limit=100)
         df = pd.DataFrame(candles, columns=['time','open','high','low','close','volume'])
         return df
     except Exception as e:
@@ -100,7 +101,7 @@ def get_15m_candles(exchange, symbol):
         return None
 
 # ─── ANALYSE COIN ─────────────────────────────────────────────────────────────
-def analyse_coin(exchange, symbol, volume_usdt):
+async def analyse_coin(exchange, symbol, volume_usdt):
     try:
         # Filter 1 — Volume
         if not passes_volume_filter(volume_usdt):
@@ -115,8 +116,8 @@ def analyse_coin(exchange, symbol, volume_usdt):
             print("🛑 Max 5 trades reached for today")
             return
 
-        # Get 15m candles (served from cache on repeat scans)
-        df = get_15m_candles(exchange, symbol)
+        # Get 15m candles via WebSocket (served from cache on repeat scans)
+        df = await get_15m_candles(exchange, symbol)
         if df is None or len(df) < 50:
             return
 
@@ -129,13 +130,13 @@ def analyse_coin(exchange, symbol, volume_usdt):
             return
 
         # Filter 4 — 1D EMA block (served from cache on repeat scans)
-        if not check_1d_ema(exchange, symbol, direction):
+        if not await check_1d_ema(exchange, symbol, direction):
             print(f"🚫 {symbol} blocked by 1D EMA filter")
             log_ghost_trade(symbol, score, "1D EMA block")
             return
 
         # Filter 5 — 4H and 1H EMA (served from cache on repeat scans)
-        if not check_4h_1h_ema(exchange, symbol, direction):
+        if not await check_4h_1h_ema(exchange, symbol, direction):
             print(f"🚫 {symbol} blocked by 4H/1H EMA filter")
             log_ghost_trade(symbol, score, "4H/1H EMA block")
             return
@@ -167,16 +168,11 @@ async def scan_market_live():
     init_db()
     system_alert("🚀 MUESA Scanner Started!")
 
-    # Sync exchange for candle data
-    sync_exchange = ccxt_sync.binance({
+    # Single async (WebSocket) exchange for both tickers and candles —
+    # no sync REST exchange needed; watch_ohlcv() replaces fetch_ohlcv()
+    exchange = ccxt.binance({
         'apiKey': os.getenv('BINANCE_API_KEY'),
         'secret': os.getenv('BINANCE_SECRET_KEY'),
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
-    })
-
-    # Async exchange for live tickers
-    async_exchange = ccxt.binance({
         'options': {'defaultType': 'future'}
     })
 
@@ -185,15 +181,15 @@ async def scan_market_live():
     try:
         while True:
             print(f"\n🔍 MUESA Scanning Market...")
-            tickers = await async_exchange.watch_tickers()
+            tickers = await exchange.watch_tickers()
 
             for symbol, data in tickers.items():
                 if not symbol.endswith('/USDT:USDT'):
                     continue
                 volume_usdt = data.get('quoteVolume', 0)
-                analyse_coin(sync_exchange, symbol, volume_usdt)
-                # Throttle requests to stay within Binance rate limits
-                time.sleep(COIN_ANALYSIS_DELAY)
+                await analyse_coin(exchange, symbol, volume_usdt)
+                # Small yield between coins to keep the event loop responsive
+                await asyncio.sleep(COIN_ANALYSIS_DELAY)
 
             print(f"⏳ Resting {SCAN_INTERVAL//60} minutes...")
             await asyncio.sleep(SCAN_INTERVAL)
@@ -202,7 +198,7 @@ async def scan_market_live():
         print(f"Scanner error: {e}")
         system_alert(f"⚠️ MUESA Scanner Error: {e}")
     finally:
-        await async_exchange.close()
+        await exchange.close()
 
 if __name__ == "__main__":
     asyncio.run(scan_market_live())
