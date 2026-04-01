@@ -29,10 +29,9 @@ def get_wallet_balance(exchange):
 def get_quantity(exchange, symbol, price):
     try:
         balance = get_wallet_balance(exchange)
-        allocation = balance * 0.05          # 5% per trade (was 25%) — max 5 trades = 25% deployed
+        allocation = balance * 0.25          # 25% per trade
         raw_qty = (allocation * 5) / price   # 5x leverage
 
-        # Get precision
         markets = exchange.load_markets()
         market = markets[symbol]
         step = float(market['filters'][1]['stepSize']) if 'filters' in market else 0.001
@@ -45,23 +44,12 @@ def get_quantity(exchange, symbol, price):
 # ─── EXECUTE TRADE ────────────────────────────────────────────────────────────
 def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
                   support=None, resistance=None, divergence=None, trend=None):
-    """
-    Open a leveraged futures position with:
-      - SL covering the full position
-      - TP1 covering 50% of the position (triggers breakeven SL move)
-      - TP2 covering the remaining 50% (trailing SL in bodyguard)
-
-    Parameters
-    ----------
-    sl, tp1, tp2 : dynamic SL and split take-profit levels from get_sl_tp()
-    support, resistance, divergence, trend : metadata for logging
-    """
     try:
         exchange = get_exchange()
         side     = 'buy'  if direction == 'LONG' else 'sell'
         opp_side = 'sell' if direction == 'LONG' else 'buy'
 
-        # Set isolated margin and 5x leverage
+        # Set isolated margin
         try:
             exchange.fapiPrivate_post_margintype({
                 "symbol": symbol.replace("/USDT:USDT", "USDT"),
@@ -70,87 +58,83 @@ def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
         except:
             pass
 
+        # Set 5x leverage
         try:
             exchange.set_leverage(5, symbol)
         except Exception as e:
             print(f"Leverage error: {e}")
 
-        # Get quantity (full position)
+        # Get full quantity
         qty = get_quantity(exchange, symbol, entry_price)
         if qty <= 0:
             print(f"❌ Invalid quantity for {symbol}")
             return False
 
         # Split into two halves for TP1 / TP2
-        # Round down to avoid over-reducing
         markets  = exchange.load_markets()
         market   = markets[symbol]
         step     = float(market['filters'][1]['stepSize']) if 'filters' in market else 0.001
         half_qty = round((qty / 2) - ((qty / 2) % step), 8)
-        # Remainder goes to TP2 (avoids rounding leaving open dust)
-        tp2_qty  = round(qty - half_qty - ((qty - half_qty) % step), 8)
+        tp2_qty  = round((qty - half_qty) - ((qty - half_qty) % step), 8)
 
-        # Market entry order
-        print(f"📤 Placing {direction} order on {symbol} | Qty: {qty} (TP1: {half_qty}, TP2: {tp2_qty})")
+        print(f"📤 {direction} | {symbol} | Qty: {qty} | Entry: {entry_price} | SL: {sl} | TP1: {tp1} | TP2: {tp2}")
+
+        # Market entry
         order        = exchange.create_market_order(symbol, side, qty)
         actual_entry = float(order.get('average', entry_price))
         print(f"✅ Entry filled at {actual_entry}")
 
-        sl_final  = sl
-        tp1_final = tp1
-        tp2_final = tp2
-
-        # Place SL order — full quantity
+        # SL — full quantity
         sl_order = exchange.create_order(
             symbol, 'STOP_MARKET', opp_side, qty,
             params={
-                'stopPrice': sl_final,
+                'stopPrice': sl,
                 'reduceOnly': True,
                 'timeInForce': 'GTC'
             }
         )
         sl_order_id = sl_order.get('id')
-        print(f"🛑 SL placed at {sl_final} (order id: {sl_order_id})")
+        print(f"🛑 SL placed at {sl} (id: {sl_order_id})")
 
-        # Place TP1 order — 50% quantity
+        # TP1 — 50% quantity
         exchange.create_order(
             symbol, 'TAKE_PROFIT_MARKET', opp_side, half_qty,
             params={
-                'stopPrice': tp1_final,
+                'stopPrice': tp1,
                 'reduceOnly': True,
                 'timeInForce': 'GTC'
             }
         )
-        print(f"🎯 TP1 placed at {tp1_final} (qty: {half_qty})")
+        print(f"🎯 TP1 placed at {tp1} (qty: {half_qty})")
 
-        # Place TP2 order — remaining 50% quantity
+        # TP2 — remaining 50%
         exchange.create_order(
             symbol, 'TAKE_PROFIT_MARKET', opp_side, tp2_qty,
             params={
-                'stopPrice': tp2_final,
+                'stopPrice': tp2,
                 'reduceOnly': True,
                 'timeInForce': 'GTC'
             }
         )
-        print(f"🎯 TP2 placed at {tp2_final} (qty: {tp2_qty})")
+        print(f"🎯 TP2 placed at {tp2} (qty: {tp2_qty})")
 
-        # Log and notify (enriched metadata)
+        # Log and notify
         log_trade(
-            symbol, direction, actual_entry, sl_final, tp1_final, tp2_final, score,
+            symbol, direction, actual_entry, sl, tp1, tp2, score,
             support=support, resistance=resistance,
             divergence=divergence, trend=trend,
-            dynamic_sl=sl_final
+            dynamic_sl=sl
         )
         increment_trade_count()
-        trade_alert(symbol, direction, actual_entry, sl_final, tp1_final, score)
+        trade_alert(symbol, direction, actual_entry, sl, tp1, tp2, score)
 
-        # Start bodyguard monitor
+        # Start bodyguard
         import threading
         entry_time = datetime.utcnow()
         threading.Thread(
             target=bodyguard_monitor,
             args=(exchange, symbol, direction, actual_entry,
-                  sl_order_id, sl_final, tp1_final, entry_time),
+                  sl_order_id, sl, tp1, entry_time),
             daemon=True
         ).start()
 
@@ -164,31 +148,15 @@ def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
 def bodyguard_monitor(exchange, symbol, direction, entry_price,
                       sl_order_id=None, sl_price=None, tp1_price=None,
                       entry_time=None):
-    """
-    Two-phase position monitor:
-
-    Phase 1 — Waiting for TP1:
-      • Polls position size every 30 s.
-      • When position size drops to ~50% (TP1 filled), cancels the original
-        full-size SL and places a new breakeven SL at entry_price.
-      • Logs and alerts the SL move.
-
-    Phase 2 — Waiting for TP2 / SL / timeout:
-      • Continues polling every 30 s.
-      • If 4 hours have elapsed since entry and position is still open,
-        closes at market and alerts timeout.
-      • When position fully closes, determines SL-hit vs TP-hit and alerts.
-    """
     print(f"🛡️ Bodyguard active for {symbol} | Entry: {entry_price} | TP1: {tp1_price}")
 
     if entry_time is None:
         entry_time = datetime.utcnow()
 
-    timeout_hours   = 4
-    tp1_hit         = False          # True once Phase 1 completes
-    initial_contracts = None         # Recorded on first successful poll
-
-    opp_side = 'sell' if direction == 'LONG' else 'buy'
+    timeout_hours     = 4
+    tp1_hit           = False
+    initial_contracts = None
+    opp_side          = 'sell' if direction == 'LONG' else 'buy'
 
     while True:
         try:
@@ -198,31 +166,30 @@ def bodyguard_monitor(exchange, symbol, direction, entry_price,
                 None
             )
 
-            # ── Record initial position size on first poll ────────────────────
+            # Record initial size
             if initial_contracts is None and pos is not None:
                 initial_contracts = float(pos.get('contracts', 0))
-                print(f"🛡️ Initial position size: {initial_contracts} contracts")
+                print(f"🛡️ Initial contracts: {initial_contracts}")
 
-            # ── Phase 1: TP1 detection ────────────────────────────────────────
+            # Phase 1 — TP1 detection
             if not tp1_hit and pos is not None and initial_contracts:
                 current_contracts = float(pos.get('contracts', 0))
-                # TP1 filled when position is reduced to ≤55% of original
                 if current_contracts <= initial_contracts * 0.55:
                     tp1_hit = True
                     ticker        = exchange.fetch_ticker(symbol)
                     current_price = float(ticker['last'])
-                    print(f"🎯 TP1 hit on {symbol} at ~{current_price}")
+                    print(f"🎯 TP1 hit on {symbol} at {current_price}")
                     tp_alert(symbol, direction, entry_price, current_price)
 
-                    # Cancel original SL order and replace with breakeven SL
+                    # Cancel original SL
                     if sl_order_id:
                         try:
                             exchange.cancel_order(sl_order_id, symbol)
-                            print(f"🗑️ Original SL order {sl_order_id} cancelled")
-                        except Exception as cancel_err:
-                            print(f"⚠️ Could not cancel SL order: {cancel_err}")
+                            print(f"🗑️ Original SL cancelled")
+                        except Exception as e:
+                            print(f"⚠️ Cancel SL error: {e}")
 
-                    # Place new breakeven SL at entry price
+                    # Move SL to breakeven
                     try:
                         remaining_qty = current_contracts
                         exchange.create_order(
@@ -233,17 +200,17 @@ def bodyguard_monitor(exchange, symbol, direction, entry_price,
                                 'timeInForce': 'GTC'
                             }
                         )
-                        print(f"🔒 SL moved to breakeven after TP1 — new SL: {entry_price}")
+                        print(f"🔒 SL moved to breakeven: {entry_price}")
                         system_alert(
-                            f"🔒 {symbol} SL moved to breakeven after TP1\n"
+                            f"🔒 {symbol} SL moved to breakeven\n"
                             f"Entry: {entry_price} | Current: {current_price}"
                         )
-                    except Exception as be_err:
-                        print(f"⚠️ Breakeven SL placement failed: {be_err}")
+                    except Exception as e:
+                        print(f"⚠️ Breakeven SL error: {e}")
 
-            # ── Phase 2: Position fully closed ───────────────────────────────
+            # Phase 2 — Position closed
             if pos is None:
-                print(f"🏁 {symbol} position fully closed")
+                print(f"🏁 {symbol} position closed")
                 ticker        = exchange.fetch_ticker(symbol)
                 current_price = float(ticker['last'])
 
@@ -265,24 +232,25 @@ def bodyguard_monitor(exchange, symbol, direction, entry_price,
                         tp_alert(symbol, direction, entry_price, current_price)
                 break
 
-            # ── Phase 2: 4-hour timeout ───────────────────────────────────────
+            # Phase 2 — 4 hour timeout
             elapsed = datetime.utcnow() - entry_time
             if tp1_hit and elapsed >= timedelta(hours=timeout_hours):
-                print(f"⏰ 4-hour timeout — closing {symbol} position at market")
+                print(f"⏰ 4hr timeout — closing {symbol}")
                 try:
                     ticker        = exchange.fetch_ticker(symbol)
                     current_price = float(ticker['last'])
                     remaining_qty = float(pos.get('contracts', 0)) if pos else 0
                     if remaining_qty > 0:
-                        exchange.create_market_order(symbol, opp_side, remaining_qty,
-                                                     params={'reduceOnly': True})
+                        exchange.create_market_order(
+                            symbol, opp_side, remaining_qty,
+                            params={'reduceOnly': True}
+                        )
                     system_alert(
-                        f"⏰ {symbol} Trade timeout — closed at {current_price}\n"
-                        f"Entry: {entry_price} | Elapsed: {int(elapsed.total_seconds() // 60)} min"
+                        f"⏰ {symbol} timeout close at {current_price}\n"
+                        f"Entry: {entry_price} | Time: {int(elapsed.total_seconds()//60)}min"
                     )
-                    print(f"⏰ {symbol} closed at {current_price} after timeout")
-                except Exception as timeout_err:
-                    print(f"⚠️ Timeout close failed: {timeout_err}")
+                except Exception as e:
+                    print(f"⚠️ Timeout close error: {e}")
                 break
 
         except Exception as e:
