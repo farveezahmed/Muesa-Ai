@@ -7,7 +7,7 @@ from datetime import datetime
 from muesa_logic import (
     init_db, can_take_trade, is_on_cooldown, passes_volume_filter,
     calculate_math_score, call_claude_ai, get_sl_tp, log_ghost_trade,
-    increment_trade_count
+    increment_trade_count, confirm_risk_reward
 )
 from muesa_telegram import system_alert
 
@@ -129,13 +129,24 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         except Exception as e:
             print(f"1h candle fetch error {symbol}: {e}")
 
-        # Math score (now returns 8-tuple with enriched metadata)
-        score, direction, rvol, rsi, support, resistance, divergence, trend = \
-            calculate_math_score(df, df_1h=df_1h)
+        # Fetch 4h candles for multi-timeframe structure confirmation
+        df_4h = None
+        try:
+            candles_4h = await _fetch_ohlcv_cached(exchange, symbol, '4h', limit=100)
+            df_4h = pd.DataFrame(candles_4h, columns=['time','open','high','low','close','volume'])
+        except Exception as e:
+            print(f"4h candle fetch error {symbol}: {e}")
+
+        # Math score — returns 12-tuple with all confirmation metadata
+        (score, direction, rvol, rsi, support, resistance, divergence, trend,
+         confluence_count, multi_tf_score, rr_ratio, vol_regime) = \
+            calculate_math_score(df, df_1h=df_1h, df_4h=df_4h)
         print(
             f"📊 {symbol} | Score: {score} | Direction: {direction} | "
             f"RSI: {rsi:.1f} | RVOL: {rvol:.2f} | Trend: {trend} | "
-            f"Divergence: {divergence} | S: {support} | R: {resistance}"
+            f"Divergence: {divergence} | S: {support} | R: {resistance} | "
+            f"Confluence: {confluence_count}/6 | Multi-TF: {multi_tf_score}/100 | "
+            f"R/R: {rr_ratio:.1f}:1 | Vol Regime: {vol_regime}"
         )
 
         if score < CLAUDE_CALL_THRESHOLD:
@@ -166,9 +177,34 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         entry_price = df['close'].iloc[-1]
         sl, tp1, tp2 = get_sl_tp(df, direction, entry_price)
 
+        # ── Advanced confirmation gate ────────────────────────────────────────
+        # Re-confirm R/R with actual SL/TP values (not the ATR estimate used in scoring)
+        final_rr_ratio, rr_confirmed = confirm_risk_reward(
+            entry_price, sl, tp1, tp2, direction
+        )
+
+        rejection_reason = None
+
+        if confluence_count < 4:
+            rejection_reason = f"Failed confluence check ({confluence_count}/6)"
+        elif multi_tf_score < 66:
+            rejection_reason = f"Multi-TF alignment too low ({multi_tf_score}/100)"
+        elif not rr_confirmed:
+            rejection_reason = f"R/R below 1.5:1 (actual {final_rr_ratio:.2f}:1)"
+
+        if rejection_reason:
+            print(f"⛔ Trade rejected: {rejection_reason}")
+            log_ghost_trade(symbol, final_score, rejection_reason)
+            return
+
         print(
             f"✅ TRADE SIGNAL: {symbol} | {direction} | Entry: {entry_price} "
             f"| SL: {sl} | TP1: {tp1} | TP2: {tp2}"
+        )
+        print(
+            f"📋 Confirmation Report — Confluence: {confluence_count}/6 | "
+            f"Multi-TF: {multi_tf_score}/100 | R/R: {final_rr_ratio:.1f}:1 | "
+            f"Vol Regime: {vol_regime} | All checks passed ✓"
         )
 
         # Execute trade (pass enriched metadata for logging)
@@ -176,7 +212,9 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         execute_trade(
             symbol, direction, entry_price, sl, tp1, tp2, final_score,
             support=support, resistance=resistance,
-            divergence=divergence, trend=trend
+            divergence=divergence, trend=trend,
+            confluence_count=confluence_count, multi_tf_score=multi_tf_score,
+            rr_ratio=final_rr_ratio, vol_regime=vol_regime
         )
 
     except Exception as e:

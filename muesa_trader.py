@@ -44,7 +44,9 @@ def get_quantity(exchange, symbol, price):
 
 # ─── EXECUTE TRADE ────────────────────────────────────────────────────────────
 def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
-                  support=None, resistance=None, divergence=None, trend=None):
+                  support=None, resistance=None, divergence=None, trend=None,
+                  confluence_count=None, multi_tf_score=None,
+                  rr_ratio=None, vol_regime=None):
     """
     Open a leveraged futures position with:
       - SL covering the full position
@@ -55,6 +57,10 @@ def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
     ----------
     sl, tp1, tp2 : dynamic SL and split take-profit levels from get_sl_tp()
     support, resistance, divergence, trend : metadata for logging
+    confluence_count : number of confluence factors (0-6)
+    multi_tf_score   : multi-timeframe alignment score (0-100)
+    rr_ratio         : confirmed risk/reward ratio for TP1
+    vol_regime       : volatility regime ("HIGH", "NORMAL", "LOW")
     """
     try:
         exchange = get_exchange()
@@ -139,7 +145,9 @@ def execute_trade(symbol, direction, entry_price, sl, tp1, tp2, score,
             symbol, direction, actual_entry, sl_final, tp1_final, tp2_final, score,
             support=support, resistance=resistance,
             divergence=divergence, trend=trend,
-            dynamic_sl=sl_final
+            dynamic_sl=sl_final,
+            confluence_count=confluence_count, multi_tf_score=multi_tf_score,
+            rr_ratio=rr_ratio, vol_regime=vol_regime
         )
         increment_trade_count()
         trade_alert(symbol, direction, actual_entry, sl_final, tp1_final, score)
