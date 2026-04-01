@@ -21,7 +21,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS trades 
                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                 time TEXT, symbol TEXT, side TEXT, 
-                entry REAL, sl REAL, tp REAL, score INTEGER)''')
+                entry REAL, sl REAL, tp1 REAL, tp2 REAL, score INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS ghost_trades 
                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                 time TEXT, symbol TEXT, score INTEGER, reason TEXT)''')
@@ -246,12 +246,14 @@ def get_sl_tp(df, direction, entry_price):
     high_low = df['high'] - df['low']
     atr = high_low.rolling(14).mean().iloc[-1]
     if direction == 'LONG':
-        sl = entry_price - (atr * 1.5)
-        tp = entry_price + (atr * 3.0)
+        sl  = entry_price - (atr * 1.5)
+        tp1 = entry_price + (atr * 2.0)  # fixed — closes 50% of position
+        tp2 = entry_price + (atr * 3.0)  # trailing — closes remaining 50%
     else:
-        sl = entry_price + (atr * 1.5)
-        tp = entry_price - (atr * 3.0)
-    return round(sl, 6), round(tp, 6)
+        sl  = entry_price + (atr * 1.5)
+        tp1 = entry_price - (atr * 2.0)  # fixed — closes 50% of position
+        tp2 = entry_price - (atr * 3.0)  # trailing — closes remaining 50%
+    return round(sl, 6), round(tp1, 6), round(tp2, 6)
 
 # ─── MATH SCORE ───────────────────────────────────────────────────────────────
 def calculate_math_score(df):
@@ -372,13 +374,13 @@ Positive if pattern confirmed, negative if pattern invalid."""
         return score
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
-def log_trade(symbol, side, entry, sl, tp, score):
+def log_trade(symbol, side, entry, sl, tp1, tp2, score):
     try:
         conn = sqlite3.connect('muesa_data.db')
         c = conn.cursor()
         now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        c.execute("INSERT INTO trades (time, symbol, side, entry, sl, tp, score) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (now, symbol, side, entry, sl, tp, score))
+        c.execute("INSERT INTO trades (time, symbol, side, entry, sl, tp1, tp2, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (now, symbol, side, entry, sl, tp1, tp2, score))
         c.execute("INSERT OR REPLACE INTO daily_stats (date, count) VALUES (?, COALESCE((SELECT count FROM daily_stats WHERE date=?), 0) + 1)",
                   (now[:10], now[:10]))
         conn.commit()
