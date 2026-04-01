@@ -24,7 +24,9 @@ def init_db():
                 time TEXT, symbol TEXT, side TEXT, 
                 entry REAL, sl REAL, tp1 REAL, tp2 REAL, score INTEGER,
                 support REAL, resistance REAL, divergence TEXT,
-                trend TEXT, dynamic_sl REAL, entry_time TEXT)''')
+                trend TEXT, dynamic_sl REAL, entry_time TEXT,
+                confluence_count INTEGER, multi_tf_score INTEGER,
+                rr_ratio REAL, vol_regime TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS ghost_trades 
                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                 time TEXT, symbol TEXT, score INTEGER, reason TEXT)''')
@@ -87,11 +89,14 @@ def detect_bull_flag(df):
     Bull Flag: strong 10%+ rally over last 30 candles, followed by at least
     10 candles of tight consolidation, then a breakout above the consolidation
     high on 1.5x+ volume. EMA7 > EMA25 and price above both required.
-    Returns True if pattern is detected.
+
+    Returns (detected: bool, strength: 1-5)
+      Strength 1: Barely meets criteria
+      Strength 5: Perfect setup (10%+ rally, <2% consolidation, 2x+ volume)
     """
     try:
         if len(df) < 40:
-            return False
+            return False, 0
 
         closes = df['close'].tolist()
         volumes = df['volume'].tolist()
@@ -101,41 +106,59 @@ def detect_bull_flag(df):
         pole_low = min(pole_window)
         pole_high = max(pole_window)
         if pole_low <= 0:
-            return False
+            return False, 0
         pole_gain = (pole_high - pole_low) / pole_low
         if pole_gain < 0.10:
-            return False
+            return False, 0
 
         # Consolidation: last 10 candles form a tight range (< 5% spread)
         consol_closes = closes[-10:]
         consol_high = max(consol_closes)
         consol_low = min(consol_closes)
         if consol_low <= 0:
-            return False
+            return False, 0
         consol_range = (consol_high - consol_low) / consol_low
         if consol_range >= 0.05:
-            return False
+            return False, 0
 
         # Breakout: current close above consolidation high
         current_close = closes[-1]
         if current_close <= consol_high:
-            return False
+            return False, 0
 
         # Volume spike on breakout candle (1.5x average of prior 20 candles)
         avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0
         if avg_vol <= 0 or volumes[-1] < avg_vol * 1.5:
-            return False
+            return False, 0
 
         # EMA alignment: EMA7 > EMA25, price above both
         ema7 = df['close'].ewm(span=7).mean().iloc[-1]
         ema25 = df['close'].ewm(span=25).mean().iloc[-1]
         if not (ema7 > ema25 and current_close > ema7 and current_close > ema25):
-            return False
+            return False, 0
 
-        return True
+        # ── Strength scoring (1-5) ────────────────────────────────────────────
+        strength = 1
+        vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+
+        # Pole gain quality
+        if pole_gain >= 0.15:
+            strength += 1
+        # Tight consolidation
+        if consol_range < 0.02:
+            strength += 1
+        # Strong volume spike
+        if vol_ratio >= 2.0:
+            strength += 1
+        # All three premium criteria met simultaneously
+        if pole_gain >= 0.10 and consol_range < 0.02 and vol_ratio >= 2.0:
+            strength = 5
+
+        strength = min(strength, 5)
+        return True, strength
     except:
         pass
-    return False
+    return False, 0
 
 # ─── PATTERN: DEATH CROSS (SHORT) ────────────────────────────────────────────
 def detect_death_cross(df):
@@ -143,11 +166,14 @@ def detect_death_cross(df):
     Death Cross: EMA7 crosses below EMA25 within the last 5 candles,
     EMA25 is below EMA99 (bearish macro structure), RSI > 60 (overbought
     into the cross), and volume is increasing on the down move.
-    Returns True if pattern is detected.
+
+    Returns (detected: bool, strength: 1-5)
+      Strength 1: EMA7 just crossed below EMA25
+      Strength 5: Clean cross, RSI 70+, volume spike 2x+
     """
     try:
         if len(df) < 105:
-            return False
+            return False, 0
 
         ema7_series = df['close'].ewm(span=7).mean()
         ema25_series = df['close'].ewm(span=25).mean()
@@ -155,7 +181,7 @@ def detect_death_cross(df):
 
         # EMA7 must currently be below EMA25
         if ema7_series.iloc[-1] >= ema25_series.iloc[-1]:
-            return False
+            return False, 0
 
         # Cross must have occurred within the last 5 candles
         crossed = False
@@ -164,11 +190,11 @@ def detect_death_cross(df):
                 crossed = True
                 break
         if not crossed:
-            return False
+            return False, 0
 
         # Bearish macro: EMA25 below EMA99
         if ema25_series.iloc[-1] >= ema99_series.iloc[-1]:
-            return False
+            return False, 0
 
         # RSI overbought at the cross (> 60)
         delta = df['close'].diff()
@@ -176,18 +202,38 @@ def detect_death_cross(df):
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / (loss + 1e-9)
         rsi_series = 100 - (100 / (1 + rs))
-        if rsi_series.iloc[-1] <= 60:
-            return False
+        rsi_val = rsi_series.iloc[-1]
+        if rsi_val <= 60:
+            return False, 0
 
         # Volume increasing on down move: last candle volume > prior 3-candle average
         avg_vol_prior = df['volume'].iloc[-4:-1].mean()
         if avg_vol_prior <= 0 or df['volume'].iloc[-1] <= avg_vol_prior:
-            return False
+            return False, 0
 
-        return True
+        # ── Strength scoring (1-5) ────────────────────────────────────────────
+        strength = 1
+        vol_ratio = df['volume'].iloc[-1] / avg_vol_prior if avg_vol_prior > 0 else 1.0
+
+        # RSI deeply overbought
+        if rsi_val >= 70:
+            strength += 1
+        # Strong volume spike
+        if vol_ratio >= 2.0:
+            strength += 1
+        # EMA separation (clean cross): EMA7 clearly below EMA25
+        ema_gap = (ema25_series.iloc[-1] - ema7_series.iloc[-1]) / ema25_series.iloc[-1]
+        if ema_gap >= 0.005:
+            strength += 1
+        # All premium criteria met
+        if rsi_val >= 70 and vol_ratio >= 2.0 and ema_gap >= 0.005:
+            strength = 5
+
+        strength = min(strength, 5)
+        return True, strength
     except:
         pass
-    return False
+    return False, 0
 
 # ─── PATTERN: VOLUME BREAKOUT (LONG) ─────────────────────────────────────────
 def detect_volume_breakout(df):
@@ -195,11 +241,14 @@ def detect_volume_breakout(df):
     Volume Breakout: price consolidates in a low-volatility range for 10+
     candles (< 4% spread), then breaks above the consolidation high on a
     2x+ volume spike. EMA7 > EMA25 and RSI < 70 (not yet overbought).
-    Returns True if pattern is detected.
+
+    Returns (detected: bool, strength: 1-5)
+      Strength 1: Barely 2x volume
+      Strength 5: 3x+ volume, tight consolidation, clean breakout
     """
     try:
         if len(df) < 15:
-            return False
+            return False, 0
 
         closes = df['close'].tolist()
         volumes = df['volume'].tolist()
@@ -209,26 +258,26 @@ def detect_volume_breakout(df):
         consol_high = max(consol_closes)
         consol_low = min(consol_closes)
         if consol_low <= 0:
-            return False
+            return False, 0
         consol_range = (consol_high - consol_low) / consol_low
         if consol_range >= 0.04:
-            return False
+            return False, 0
 
         # Breakout: current close above consolidation high
         current_close = closes[-1]
         if current_close <= consol_high:
-            return False
+            return False, 0
 
         # Volume spike: current candle volume >= 2x average of consolidation candles
         avg_consol_vol = sum(volumes[-11:-1]) / 10
         if avg_consol_vol <= 0 or volumes[-1] < avg_consol_vol * 2.0:
-            return False
+            return False, 0
 
         # EMA alignment: EMA7 > EMA25
         ema7 = df['close'].ewm(span=7).mean().iloc[-1]
         ema25 = df['close'].ewm(span=25).mean().iloc[-1]
         if ema7 <= ema25:
-            return False
+            return False, 0
 
         # RSI not overbought (< 70)
         delta = df['close'].diff()
@@ -237,12 +286,31 @@ def detect_volume_breakout(df):
         rs = gain / (loss + 1e-9)
         rsi_series = 100 - (100 / (1 + rs))
         if rsi_series.iloc[-1] >= 70:
-            return False
+            return False, 0
 
-        return True
+        # ── Strength scoring (1-5) ────────────────────────────────────────────
+        strength = 1
+        vol_ratio = volumes[-1] / avg_consol_vol if avg_consol_vol > 0 else 2.0
+
+        # Very tight consolidation
+        if consol_range < 0.02:
+            strength += 1
+        # Strong volume spike (3x+)
+        if vol_ratio >= 3.0:
+            strength += 1
+        # Clean breakout: close well above consolidation high (0.5%+)
+        breakout_pct = (current_close - consol_high) / consol_high
+        if breakout_pct >= 0.005:
+            strength += 1
+        # All premium criteria met
+        if consol_range < 0.02 and vol_ratio >= 3.0 and breakout_pct >= 0.005:
+            strength = 5
+
+        strength = min(strength, 5)
+        return True, strength
     except:
         pass
-    return False
+    return False, 0
 
 # ─── ATR BASED SL/TP (DYNAMIC VOLATILITY) ────────────────────────────────────
 def get_sl_tp(df, direction, entry_price):
@@ -470,20 +538,296 @@ def is_in_liquidity_zone(df, support, resistance):
         return False, False
 
 
+# ─── MULTI-TIMEFRAME CONFIRMATION ────────────────────────────────────────────
+def confirm_multi_timeframe(df_15m, df_1h, df_4h):
+    """
+    Check trend alignment across 3 timeframes for LONG or SHORT direction.
+
+    15m: Entry signal  — EMA7 > EMA25 and RSI 30-60 (LONG)
+    1h:  Trend confirm — EMA7 > EMA25 and price > 200-EMA (LONG)
+    4h:  Structure     — EMA7 > EMA25 and no recent reversal (LONG)
+
+    Returns (confirmed: bool, alignment_score: 0-100)
+    confirmed = True if alignment_score >= 66 (2+ timeframes aligned)
+    """
+    try:
+        aligned_count = 0
+        tf_results = {'15m': False, '1h': False, '4h': False}
+
+        # Determine direction from 15m EMA alignment
+        ema7_15m  = df_15m['close'].ewm(span=7).mean().iloc[-1]
+        ema25_15m = df_15m['close'].ewm(span=25).mean().iloc[-1]
+        direction = 'LONG' if ema7_15m > ema25_15m else 'SHORT'
+
+        # ── 15m: Entry signal ────────────────────────────────────────────────
+        delta_15m = df_15m['close'].diff()
+        gain_15m  = delta_15m.where(delta_15m > 0, 0).rolling(14).mean()
+        loss_15m  = (-delta_15m.where(delta_15m < 0, 0)).rolling(14).mean()
+        rsi_15m   = (100 - (100 / (1 + gain_15m / (loss_15m + 1e-9)))).iloc[-1]
+
+        if direction == 'LONG':
+            if ema7_15m > ema25_15m and 30 <= rsi_15m <= 60:
+                aligned_count += 1
+                tf_results['15m'] = True
+        else:
+            if ema7_15m < ema25_15m and 40 <= rsi_15m <= 70:
+                aligned_count += 1
+                tf_results['15m'] = True
+
+        # ── 1h: Trend confirmation ───────────────────────────────────────────
+        if df_1h is not None and len(df_1h) >= 50:
+            ema7_1h   = df_1h['close'].ewm(span=7).mean().iloc[-1]
+            ema25_1h  = df_1h['close'].ewm(span=25).mean().iloc[-1]
+            ema200_1h = df_1h['close'].ewm(span=200).mean().iloc[-1]
+            price_1h  = df_1h['close'].iloc[-1]
+
+            if direction == 'LONG':
+                if ema7_1h > ema25_1h and price_1h > ema200_1h:
+                    aligned_count += 1
+                    tf_results['1h'] = True
+            else:
+                if ema7_1h < ema25_1h and price_1h < ema200_1h:
+                    aligned_count += 1
+                    tf_results['1h'] = True
+
+        # ── 4h: Structure confirmation ───────────────────────────────────────
+        if df_4h is not None and len(df_4h) >= 20:
+            ema7_4h  = df_4h['close'].ewm(span=7).mean()
+            ema25_4h = df_4h['close'].ewm(span=25).mean()
+
+            if direction == 'LONG':
+                ema_aligned_4h = ema7_4h.iloc[-1] > ema25_4h.iloc[-1]
+                # No recent reversal: EMA7 has been above EMA25 for last 3 candles
+                no_reversal = all(
+                    ema7_4h.iloc[-i] > ema25_4h.iloc[-i] for i in range(1, 4)
+                )
+                if ema_aligned_4h and no_reversal:
+                    aligned_count += 1
+                    tf_results['4h'] = True
+            else:
+                ema_aligned_4h = ema7_4h.iloc[-1] < ema25_4h.iloc[-1]
+                no_reversal = all(
+                    ema7_4h.iloc[-i] < ema25_4h.iloc[-i] for i in range(1, 4)
+                )
+                if ema_aligned_4h and no_reversal:
+                    aligned_count += 1
+                    tf_results['4h'] = True
+
+        alignment_score = aligned_count * 33
+        alignment_score = min(alignment_score, 100)
+        confirmed = alignment_score >= 66
+
+        tf_15m_sym = '✓' if tf_results['15m'] else '✗'
+        tf_1h_sym  = '✓' if tf_results['1h']  else '✗'
+        tf_4h_sym  = '✓' if tf_results['4h']  else '✗'
+        print(
+            f"📊 Multi-TF Alignment: 15m {tf_15m_sym} | 1h {tf_1h_sym} | "
+            f"4h {tf_4h_sym} ({alignment_score}/100)"
+        )
+        return confirmed, alignment_score
+
+    except Exception as e:
+        print(f"Multi-TF confirmation error: {e}")
+        return False, 0
+
+
+# ─── CONFLUENCE SCORE ─────────────────────────────────────────────────────────
+def calculate_confluence_score(df, df_1h, direction, support, resistance,
+                                divergence, trend, pattern_detected):
+    """
+    Count how many of 6 confluence factors are present.
+
+    1. EMA alignment (EMA7 > EMA25 for LONG)
+    2. RSI in optimal zone (30-60 LONG, 40-70 SHORT)
+    3. Volume spike (RVOL >= 1.5)
+    4. Pattern detected (Bull Flag, Death Cross, or Volume Breakout)
+    5. Trend aligned (price > 200-EMA for LONG, price < 200-EMA for SHORT)
+    6. S/R breakout or divergence
+
+    Returns (confluence_count: 0-6, confluence_score: 0-100)
+    """
+    try:
+        count = 0
+        labels = []
+
+        ema7  = df['close'].ewm(span=7).mean().iloc[-1]
+        ema25 = df['close'].ewm(span=25).mean().iloc[-1]
+        price = df['close'].iloc[-1]
+
+        delta = df['close'].diff()
+        gain  = delta.where(delta > 0, 0).rolling(14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi   = (100 - (100 / (1 + gain / (loss + 1e-9)))).iloc[-1]
+
+        avg_vol = df['volume'].tail(20).mean()
+        rvol    = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+
+        # 1. EMA alignment
+        ema_ok = (direction == 'LONG' and ema7 > ema25) or \
+                 (direction == 'SHORT' and ema7 < ema25)
+        if ema_ok:
+            count += 1
+            labels.append('EMA ✓')
+        else:
+            labels.append('EMA ✗')
+
+        # 2. RSI in optimal zone
+        rsi_ok = (direction == 'LONG'  and 30 <= rsi <= 60) or \
+                 (direction == 'SHORT' and 40 <= rsi <= 70)
+        if rsi_ok:
+            count += 1
+            labels.append('RSI ✓')
+        else:
+            labels.append('RSI ✗')
+
+        # 3. Volume spike
+        if rvol >= 1.5:
+            count += 1
+            labels.append('Volume ✓')
+        else:
+            labels.append('Volume ✗')
+
+        # 4. Pattern detected
+        if pattern_detected:
+            count += 1
+            labels.append('Pattern ✓')
+        else:
+            labels.append('Pattern ✗')
+
+        # 5. Trend aligned (200-EMA on 1h)
+        trend_ok = (direction == 'LONG'  and trend == 'BULLISH') or \
+                   (direction == 'SHORT' and trend == 'BEARISH')
+        if trend_ok:
+            count += 1
+            labels.append('Trend ✓')
+        else:
+            labels.append('Trend ✗')
+
+        # 6. S/R breakout or divergence
+        sr_div_ok = False
+        if resistance is not None and price > resistance and rvol >= 1.5:
+            sr_div_ok = True
+        if divergence is not None:
+            if (direction == 'LONG'  and divergence == 'BULLISH') or \
+               (direction == 'SHORT' and divergence == 'BEARISH'):
+                sr_div_ok = True
+        if sr_div_ok:
+            count += 1
+            labels.append('S/R ✓')
+        else:
+            labels.append('S/R ✗')
+
+        confluence_score = round(count * (100 / 6))
+        label_str = ' | '.join(labels)
+        print(f"🔗 Confluence: {count}/6 ({label_str}) = {confluence_score}/100")
+        return count, confluence_score
+
+    except Exception as e:
+        print(f"Confluence score error: {e}")
+        return 0, 0
+
+
+# ─── RISK/REWARD CONFIRMATION ─────────────────────────────────────────────────
+def confirm_risk_reward(entry_price, sl, tp1, tp2, direction):
+    """
+    Calculate R/R ratio for TP1 and TP2.
+
+    LONG:  R/R = (tp - entry) / (entry - sl)
+    SHORT: R/R = (entry - tp) / (sl - entry)
+
+    Returns (rr_ratio: float, confirmed: bool)
+    confirmed = True if rr_ratio >= 1.5
+    """
+    try:
+        if direction == 'LONG':
+            risk   = entry_price - sl
+            rr_tp1 = (tp1 - entry_price) / risk if risk > 0 else 0.0
+            rr_tp2 = (tp2 - entry_price) / risk if risk > 0 else 0.0
+        else:
+            risk   = sl - entry_price
+            rr_tp1 = (entry_price - tp1) / risk if risk > 0 else 0.0
+            rr_tp2 = (entry_price - tp2) / risk if risk > 0 else 0.0
+
+        confirmed = rr_tp1 >= 1.5
+        status    = '✓ Confirmed' if confirmed else '✗ Below threshold'
+        print(
+            f"💰 Risk/Reward: {rr_tp1:.1f}:1 (TP1) | {rr_tp2:.1f}:1 (TP2) "
+            f"{status}"
+        )
+        return rr_tp1, confirmed
+
+    except Exception as e:
+        print(f"R/R confirmation error: {e}")
+        return 0.0, False
+
+
+# ─── VOLATILITY REGIME CONFIRMATION ──────────────────────────────────────────
+def confirm_volatility_regime(df, pattern_type, direction):
+    """
+    Classify current volatility regime and check if the pattern fits.
+
+    HIGH   (ratio > 1.5): Only BREAKOUT patterns (Volume Breakout, Bull Flag)
+    NORMAL (0.7-1.5):     All patterns allowed
+    LOW    (ratio < 0.7): Only BOUNCE patterns (S/R bounces, divergence reversals)
+
+    Returns (regime: str, confirmed: bool)
+    """
+    try:
+        high_low    = df['high'] - df['low']
+        atr_series  = high_low.rolling(14).mean()
+        current_atr = atr_series.iloc[-1]
+        avg_atr_20  = atr_series.iloc[-20:].mean() if len(atr_series) >= 20 else current_atr
+        ratio       = current_atr / avg_atr_20 if avg_atr_20 > 0 else 1.0
+
+        if ratio > 1.5:
+            regime = 'HIGH'
+        elif ratio < 0.7:
+            regime = 'LOW'
+        else:
+            regime = 'NORMAL'
+
+        # Classify pattern type
+        breakout_patterns = {'bull_flag', 'volume_breakout'}
+        bounce_patterns   = {'sr_bounce', 'divergence_reversal', 'death_cross'}
+
+        if regime == 'HIGH':
+            confirmed = pattern_type in breakout_patterns
+        elif regime == 'LOW':
+            confirmed = pattern_type in bounce_patterns
+        else:
+            confirmed = True  # NORMAL: all patterns allowed
+
+        status = '✓ Confirmed' if confirmed else '✗ Mismatch'
+        print(
+            f"🌪️ Volatility Regime: {regime} (ratio={ratio:.2f}) | "
+            f"Pattern: {pattern_type} {status}"
+        )
+        return regime, confirmed
+
+    except Exception as e:
+        print(f"Volatility regime error: {e}")
+        return 'NORMAL', True
+
+
 # ─── MATH SCORE ───────────────────────────────────────────────────────────────
-def calculate_math_score(df, df_1h=None):
+def calculate_math_score(df, df_1h=None, df_4h=None):
     """
     Calculate a composite math score for a potential trade signal.
 
-    Now integrates:
+    Integrates all detection layers:
       1. Support / Resistance detection  (penalty near zones, bonus on breakout)
       2. RSI Divergence detection        (bonus for confirmed divergence)
       3. 200-EMA Trend Filter (1h)       (penalty counter-trend, bonus aligned)
       4. Liquidity Zone detection        (penalty inside zone, bonus on breakout)
-      5. Dynamic volatility context      (printed for reference)
+      5. Pattern Strength scoring        (partial bonus for strength 3-4, full for 5)
+      6. Multi-Timeframe Confirmation    (penalty -20 if alignment < 66)
+      7. Confluence Score                (penalty if confluence_count < 4)
+      8. Risk/Reward Confirmation        (penalty -25 if R/R < 1.5)
+      9. Volatility Regime Confirmation  (penalty -20 if pattern mismatches regime)
 
     Returns:
-        (score, direction, rvol, rsi, support, resistance, divergence_type, trend)
+        (score, direction, rvol, rsi, support, resistance, divergence_type, trend,
+         confluence_count, multi_tf_score, rr_ratio, vol_regime)
     """
     # ── Base indicators ──────────────────────────────────────────────────────
     df['ema_20'] = df['close'].ewm(span=20).mean()
@@ -539,40 +883,76 @@ def calculate_math_score(df, df_1h=None):
         score -= 30
         print(f"⚠️ Pattern 14 detected — False Recovery penalty applied")
 
-    # ── Bull Flag bonus (+20, LONG) ───────────────────────────────────────────
-    bull_flag = detect_bull_flag(df)
+    # ── Bull Flag bonus (strength-weighted, LONG) ─────────────────────────────
+    bull_flag, bf_strength = detect_bull_flag(df)
     if bull_flag:
-        score += 20
-        print(f"🚩 Bull Flag detected — +20 bonus applied (LONG setup)")
+        if bf_strength >= 5:
+            bf_bonus = 20
+        elif bf_strength >= 3:
+            bf_bonus = 10
+        else:
+            bf_bonus = 0   # Strength 1-2: no bonus
+        if bf_bonus > 0:
+            score += bf_bonus
+            print(f"🚩 Bull Flag (Strength {bf_strength}/5) — +{bf_bonus} bonus applied")
+        else:
+            print(f"🚩 Bull Flag (Strength {bf_strength}/5) — below threshold, no bonus")
     else:
         print(f"🚩 Bull Flag: not detected")
 
-    # ── Death Cross bonus (+20, SHORT) ────────────────────────────────────────
-    death_cross = detect_death_cross(df)
+    # ── Death Cross bonus (strength-weighted, SHORT) ──────────────────────────
+    death_cross, dc_strength = detect_death_cross(df)
     if death_cross:
-        score += 20
-        print(f"💀 Death Cross detected — +20 bonus applied (SHORT setup)")
+        if dc_strength >= 5:
+            dc_bonus = 20
+        elif dc_strength >= 3:
+            dc_bonus = 10
+        else:
+            dc_bonus = 0
+        if dc_bonus > 0:
+            score += dc_bonus
+            print(f"💀 Death Cross (Strength {dc_strength}/5) — +{dc_bonus} bonus applied")
+        else:
+            print(f"💀 Death Cross (Strength {dc_strength}/5) — below threshold, no bonus")
     else:
         print(f"💀 Death Cross: not detected")
 
-    # ── Volume Breakout bonus (+15, LONG) ─────────────────────────────────────
-    vol_breakout = detect_volume_breakout(df)
+    # ── Volume Breakout bonus (strength-weighted, LONG) ───────────────────────
+    vol_breakout, vb_strength = detect_volume_breakout(df)
     if vol_breakout:
-        score += 15
-        print(f"📈 Volume Breakout detected — +15 bonus applied (LONG setup)")
+        if vb_strength >= 5:
+            vb_bonus = 15
+        elif vb_strength >= 3:
+            vb_bonus = 8
+        else:
+            vb_bonus = 0
+        if vb_bonus > 0:
+            score += vb_bonus
+            print(f"📈 Volume Breakout (Strength {vb_strength}/5) — +{vb_bonus} bonus applied")
+        else:
+            print(f"📈 Volume Breakout (Strength {vb_strength}/5) — below threshold, no bonus")
     else:
         print(f"📈 Volume Breakout: not detected")
 
+    # Determine active pattern type for volatility regime check
+    if bull_flag:
+        active_pattern = 'bull_flag'
+    elif vol_breakout:
+        active_pattern = 'volume_breakout'
+    elif death_cross:
+        active_pattern = 'death_cross'
+    else:
+        active_pattern = 'none'
+
+    any_pattern_detected = bull_flag or death_cross or vol_breakout
+
     # ════════════════════════════════════════════════════════════════════════
-    # NEW DETECTIONS (applied in order: S/R → divergence → trend → liquidity)
+    # DETECTION LAYERS (S/R → divergence → trend → liquidity)
     # ════════════════════════════════════════════════════════════════════════
 
     # ── 1. Support / Resistance ───────────────────────────────────────────────
     support, resistance, sup_strength, res_strength = detect_support_resistance(df)
     print(f"📊 S/R — Support: {support} (×{sup_strength}) | Resistance: {resistance} (×{res_strength})")
-
-    sr_penalty_applied  = False
-    sr_breakout_applied = False
 
     if support is not None and price > 0:
         near_support    = abs(price - support)    / price <= 0.02
@@ -581,15 +961,12 @@ def calculate_math_score(df, df_1h=None):
 
         if near_support or near_resistance:
             score -= 10
-            sr_penalty_applied = True
             print(f"⚠️ Price within 2% of S/R level — -10 penalty applied")
 
-        # Liquidity breakout: price broke above resistance on elevated volume
         if (resistance is not None and
                 price > resistance and
                 rvol >= 1.5):
             score += 15
-            sr_breakout_applied = True
             print(f"🚀 Liquidity breakout above resistance on volume — +15 bonus applied")
 
     # ── 2. RSI Divergence ─────────────────────────────────────────────────────
@@ -641,7 +1018,66 @@ def calculate_math_score(df, df_1h=None):
     else:
         print(f"💧 Liquidity zone: clear")
 
-    return score, direction, rvol, rsi, support, resistance, divergence_type, trend
+    # ════════════════════════════════════════════════════════════════════════
+    # ADVANCED CONFIRMATION LAYERS (5 new mechanisms)
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── 5. Multi-Timeframe Confirmation ──────────────────────────────────────
+    multi_tf_confirmed, multi_tf_score = confirm_multi_timeframe(df, df_1h, df_4h)
+    if not multi_tf_confirmed:
+        score -= 20
+        print(f"⚠️ Multi-TF alignment below 66 — -20 penalty applied")
+
+    # ── 6. Confluence Score ───────────────────────────────────────────────────
+    confluence_count, confluence_score_val = calculate_confluence_score(
+        df, df_1h, direction, support, resistance,
+        divergence_type, trend, any_pattern_detected
+    )
+    if confluence_count < 4:
+        penalty = (4 - confluence_count) * 10
+        score -= penalty
+        print(f"⚠️ Confluence {confluence_count}/6 (below 4) — -{penalty} penalty applied")
+
+    # ── 7. Risk/Reward Confirmation (requires SL/TP — use ATR-based estimate) ─
+    # Compute a provisional SL/TP to evaluate R/R before final execution
+    high_low    = df['high'] - df['low']
+    atr_series  = high_low.rolling(14).mean()
+    current_atr = atr_series.iloc[-1]
+    avg_atr_20  = atr_series.iloc[-20:].mean() if len(atr_series) >= 20 else current_atr
+    vol_ratio   = current_atr / avg_atr_20 if avg_atr_20 > 0 else 1.0
+    sl_mult     = 2.0 if vol_ratio > 1.5 else (1.0 if vol_ratio < 0.7 else 1.5)
+
+    if direction == 'LONG':
+        est_sl  = price - (current_atr * sl_mult)
+        est_tp1 = price + (current_atr * 2.0)
+        est_tp2 = price + (current_atr * 3.0)
+    else:
+        est_sl  = price + (current_atr * sl_mult)
+        est_tp1 = price - (current_atr * 2.0)
+        est_tp2 = price - (current_atr * 3.0)
+
+    rr_ratio, rr_confirmed = confirm_risk_reward(price, est_sl, est_tp1, est_tp2, direction)
+    if not rr_confirmed:
+        score -= 25
+        print(f"⚠️ R/R below 1.5:1 — -25 penalty applied")
+
+    # ── 8. Volatility Regime Confirmation ────────────────────────────────────
+    vol_regime, vol_regime_confirmed = confirm_volatility_regime(df, active_pattern, direction)
+    if not vol_regime_confirmed:
+        score -= 20
+        print(f"⚠️ Pattern mismatches volatility regime — -20 penalty applied")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(
+        f"✅ SCORE CONFIRMATION SUMMARY: "
+        f"Confluence {confluence_count}/6 | "
+        f"Multi-TF {multi_tf_score}/100 | "
+        f"R/R {rr_ratio:.1f}:1 | "
+        f"Vol Regime {vol_regime} {'✓' if vol_regime_confirmed else '✗'}"
+    )
+
+    return (score, direction, rvol, rsi, support, resistance, divergence_type, trend,
+            confluence_count, multi_tf_score, rr_ratio, vol_regime)
 
 # ─── CLAUDE API ───────────────────────────────────────────────────────────────
 def call_claude_ai(symbol, score, direction, rsi, rvol):
@@ -682,7 +1118,9 @@ Positive if pattern confirmed, negative if pattern invalid."""
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 def log_trade(symbol, side, entry, sl, tp1, tp2, score,
               support=None, resistance=None, divergence=None,
-              trend=None, dynamic_sl=None):
+              trend=None, dynamic_sl=None,
+              confluence_count=None, multi_tf_score=None,
+              rr_ratio=None, vol_regime=None):
     """
     Persist a trade to the database with all enriched metadata.
 
@@ -693,6 +1131,10 @@ def log_trade(symbol, side, entry, sl, tp1, tp2, score,
     divergence          : "BULLISH", "BEARISH", or None
     trend               : "BULLISH", "BEARISH", or "NEUTRAL"
     dynamic_sl          : actual SL value after volatility adjustment
+    confluence_count    : number of confluence factors (0-6)
+    multi_tf_score      : multi-timeframe alignment score (0-100)
+    rr_ratio            : risk/reward ratio for TP1
+    vol_regime          : volatility regime ("HIGH", "NORMAL", "LOW")
     """
     try:
         conn = sqlite3.connect('muesa_data.db')
@@ -701,10 +1143,12 @@ def log_trade(symbol, side, entry, sl, tp1, tp2, score,
         c.execute(
             """INSERT INTO trades
                (time, symbol, side, entry, sl, tp1, tp2, score,
-                support, resistance, divergence, trend, dynamic_sl, entry_time)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                support, resistance, divergence, trend, dynamic_sl, entry_time,
+                confluence_count, multi_tf_score, rr_ratio, vol_regime)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, symbol, side, entry, sl, tp1, tp2, score,
-             support, resistance, divergence, trend, dynamic_sl, now)
+             support, resistance, divergence, trend, dynamic_sl, now,
+             confluence_count, multi_tf_score, rr_ratio, vol_regime)
         )
         c.execute(
             "INSERT OR REPLACE INTO daily_stats (date, count) "
