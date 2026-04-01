@@ -121,9 +121,22 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         if df is None or len(df) < 50:
             return
 
-        # Math score
-        score, direction, rvol, rsi = calculate_math_score(df)
-        print(f"📊 {symbol} | Score: {score} | Direction: {direction} | RSI: {rsi:.1f} | RVOL: {rvol:.2f}")
+        # Fetch 1h candles for 200-EMA trend filter (served from cache)
+        df_1h = None
+        try:
+            candles_1h = await _fetch_ohlcv_cached(exchange, symbol, '1h', limit=250)
+            df_1h = pd.DataFrame(candles_1h, columns=['time','open','high','low','close','volume'])
+        except Exception as e:
+            print(f"1h candle fetch error {symbol}: {e}")
+
+        # Math score (now returns 8-tuple with enriched metadata)
+        score, direction, rvol, rsi, support, resistance, divergence, trend = \
+            calculate_math_score(df, df_1h=df_1h)
+        print(
+            f"📊 {symbol} | Score: {score} | Direction: {direction} | "
+            f"RSI: {rsi:.1f} | RVOL: {rvol:.2f} | Trend: {trend} | "
+            f"Divergence: {divergence} | S: {support} | R: {resistance}"
+        )
 
         if score < CLAUDE_CALL_THRESHOLD:
             log_ghost_trade(symbol, score, "Below 60 threshold")
@@ -149,15 +162,22 @@ async def analyse_coin(exchange, symbol, volume_usdt):
             log_ghost_trade(symbol, final_score, "Below 75 final threshold")
             return
 
-        # Get SL/TP
+        # Get dynamic SL / TP1 / TP2
         entry_price = df['close'].iloc[-1]
-        sl, tp = get_sl_tp(df, direction, entry_price)
+        sl, tp1, tp2 = get_sl_tp(df, direction, entry_price)
 
-        print(f"✅ TRADE SIGNAL: {symbol} | {direction} | Entry: {entry_price} | SL: {sl} | TP: {tp}")
+        print(
+            f"✅ TRADE SIGNAL: {symbol} | {direction} | Entry: {entry_price} "
+            f"| SL: {sl} | TP1: {tp1} | TP2: {tp2}"
+        )
 
-        # Execute trade
+        # Execute trade (pass enriched metadata for logging)
         from muesa_trader import execute_trade
-        execute_trade(symbol, direction, entry_price, sl, tp, final_score)
+        execute_trade(
+            symbol, direction, entry_price, sl, tp1, tp2, final_score,
+            support=support, resistance=resistance,
+            divergence=divergence, trend=trend
+        )
 
     except Exception as e:
         print(f"Analyse error {symbol}: {e}")
