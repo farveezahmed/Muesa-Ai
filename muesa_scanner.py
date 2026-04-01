@@ -151,13 +151,13 @@ async def analyse_coin(exchange, symbol, volume_usdt):
 
         # Get SL/TP
         entry_price = df['close'].iloc[-1]
-        sl, tp = get_sl_tp(df, direction, entry_price)
+        sl, tp1, tp2 = get_sl_tp(df, direction, entry_price)
 
-        print(f"✅ TRADE SIGNAL: {symbol} | {direction} | Entry: {entry_price} | SL: {sl} | TP: {tp}")
+        print(f"✅ TRADE SIGNAL: {symbol} | {direction} | Entry: {entry_price} | SL: {sl} | TP1: {tp1} | TP2: {tp2}")
 
         # Execute trade
         from muesa_trader import execute_trade
-        execute_trade(symbol, direction, entry_price, sl, tp, final_score)
+        execute_trade(symbol, direction, entry_price, sl, tp1, tp2, final_score)
 
     except Exception as e:
         print(f"Analyse error {symbol}: {e}")

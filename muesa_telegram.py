@@ -17,14 +17,15 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def trade_alert(symbol, direction, entry, sl, tp, score):
+def trade_alert(symbol, direction, entry, sl, tp1, tp2, score):
     emoji = "🟢" if direction == "LONG" else "🔴"
     msg = f"""
 🚀 <b>MUESA TRADE ALERT</b>
 {emoji} <b>{direction}</b> | {symbol}
 💰 Entry: {entry}
 🛑 SL: {sl}
-🎯 TP: {tp}
+🎯 TP1 (50%): {tp1}
+🎯 TP2 (50% trail): {tp2}
 ⭐ Score: {score}/100
     """
     send_telegram(msg)
@@ -39,13 +40,17 @@ def sl_alert(symbol, direction, entry, current):
     """
     send_telegram(msg)
 
-def tp_alert(symbol, direction, entry, current):
+def tp_alert(symbol, direction, entry, current, tp_level="TP"):
+    level_label = {
+        "TP1": "TP1 Hit — 50% closed 🔒",
+        "TP2": "TP2 Hit — remaining 50% closed ✅",
+    }.get(tp_level, "TP Hit ✅")
     msg = f"""
-🎯 <b>MUESA TP HIT</b>
+🎯 <b>MUESA {tp_level} HIT</b>
 📌 {symbol} | {direction}
 💰 Entry: {entry}
 📈 Closed: {current}
-✅ Profit Secured!
+{level_label}
     """
     send_telegram(msg)
 
