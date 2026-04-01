@@ -50,17 +50,21 @@ def get_summary():
         total = c.fetchone()[0]
         c.execute("SELECT COUNT(*) FROM ghost_trades")
         ghosts = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM trades WHERE side='LONG'")
+        longs = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM trades WHERE side='SHORT'")
+        shorts = c.fetchone()[0]
         conn.close()
-        return trades_today, total, ghosts
+        return trades_today, total, ghosts, longs, shorts
     except:
-        return 0, 0, 0
+        return 0, 0, 0, 0, 0
 
 @app.route('/')
 def dashboard():
     trades = get_recent_trades()
     stats = get_daily_stats()
     ghosts = get_ghost_trades()
-    trades_today, total_trades, total_ghosts = get_summary()
+    trades_today, total_trades, total_ghosts, total_longs, total_shorts = get_summary()
     now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
 
     html = f"""<!DOCTYPE html>
@@ -83,42 +87,34 @@ def dashboard():
     --text: #c8d8f0;
     --muted: #4a6080;
     --border: #1a2a40;
-    --glow: 0 0 20px rgba(0,245,196,0.15);
-    --glow2: 0 0 20px rgba(0,153,255,0.15);
   }}
-
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-
   body {{
     background: var(--bg);
     color: var(--text);
     font-family: 'Rajdhani', sans-serif;
     min-height: 100vh;
-    overflow-x: hidden;
   }}
-
   body::before {{
     content: '';
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: 
+    background:
       radial-gradient(ellipse at 20% 20%, rgba(0,245,196,0.03) 0%, transparent 50%),
       radial-gradient(ellipse at 80% 80%, rgba(0,153,255,0.03) 0%, transparent 50%);
     pointer-events: none;
     z-index: 0;
   }}
-
   .grid-bg {{
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    background-image: 
+    background-image:
       linear-gradient(rgba(0,245,196,0.03) 1px, transparent 1px),
       linear-gradient(90deg, rgba(0,245,196,0.03) 1px, transparent 1px);
     background-size: 40px 40px;
     pointer-events: none;
     z-index: 0;
   }}
-
   .container {{
     position: relative;
     z-index: 1;
@@ -126,8 +122,6 @@ def dashboard():
     margin: 0 auto;
     padding: 24px;
   }}
-
-  /* HEADER */
   .header {{
     display: flex;
     justify-content: space-between;
@@ -136,346 +130,191 @@ def dashboard():
     padding-bottom: 20px;
     border-bottom: 1px solid var(--border);
   }}
-
   .logo {{
     display: flex;
     align-items: center;
     gap: 16px;
   }}
-
   .logo-icon {{
-    width: 48px;
-    height: 48px;
+    width: 48px; height: 48px;
     background: linear-gradient(135deg, var(--accent), var(--accent2));
     border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: flex; align-items: center; justify-content: center;
     font-size: 24px;
-    box-shadow: var(--glow);
   }}
-
   .logo-text {{
-    font-size: 28px;
-    font-weight: 700;
-    letter-spacing: 4px;
+    font-size: 28px; font-weight: 700; letter-spacing: 4px;
     background: linear-gradient(90deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   }}
-
   .logo-sub {{
     font-family: 'Share Tech Mono', monospace;
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 2px;
-    margin-top: 2px;
+    font-size: 11px; color: var(--muted); letter-spacing: 2px; margin-top: 2px;
   }}
-
-  .header-right {{
-    text-align: right;
-  }}
-
+  .header-right {{ text-align: right; }}
   .status-badge {{
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    display: inline-flex; align-items: center; gap: 8px;
     background: rgba(0,245,196,0.1);
     border: 1px solid rgba(0,245,196,0.3);
-    border-radius: 20px;
-    padding: 6px 16px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--accent);
-    letter-spacing: 1px;
-    margin-bottom: 8px;
+    border-radius: 20px; padding: 6px 16px;
+    font-size: 13px; font-weight: 600; color: var(--accent);
+    letter-spacing: 1px; margin-bottom: 8px;
   }}
-
   .status-dot {{
-    width: 8px;
-    height: 8px;
-    background: var(--accent);
-    border-radius: 50%;
+    width: 8px; height: 8px;
+    background: var(--accent); border-radius: 50%;
     animation: pulse 2s infinite;
   }}
-
   @keyframes pulse {{
     0%, 100% {{ opacity: 1; transform: scale(1); }}
     50% {{ opacity: 0.5; transform: scale(0.8); }}
   }}
-
   .last-update {{
     font-family: 'Share Tech Mono', monospace;
-    font-size: 11px;
-    color: var(--muted);
+    font-size: 11px; color: var(--muted);
   }}
-
-  /* STAT CARDS */
   .stats-grid {{
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 28px;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px; margin-bottom: 28px;
   }}
-
   .stat-card {{
     background: var(--bg2);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 20px 24px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.3s;
+    border-radius: 16px; padding: 20px 24px;
+    position: relative; overflow: hidden;
   }}
-
   .stat-card::before {{
     content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
   }}
-
   .stat-card.green::before {{ background: linear-gradient(90deg, var(--accent), transparent); }}
   .stat-card.blue::before {{ background: linear-gradient(90deg, var(--accent2), transparent); }}
   .stat-card.warn::before {{ background: linear-gradient(90deg, var(--warn), transparent); }}
   .stat-card.danger::before {{ background: linear-gradient(90deg, var(--danger), transparent); }}
-
+  .stat-card.purple::before {{ background: linear-gradient(90deg, #a855f7, transparent); }}
+  .stat-card.teal::before {{ background: linear-gradient(90deg, #14b8a6, transparent); }}
   .stat-label {{
-    font-size: 11px;
-    letter-spacing: 2px;
-    color: var(--muted);
-    text-transform: uppercase;
-    margin-bottom: 8px;
+    font-size: 10px; letter-spacing: 2px;
+    color: var(--muted); text-transform: uppercase; margin-bottom: 8px;
   }}
-
   .stat-value {{
-    font-size: 36px;
-    font-weight: 700;
-    line-height: 1;
-    margin-bottom: 4px;
+    font-size: 32px; font-weight: 700; line-height: 1; margin-bottom: 4px;
   }}
-
   .stat-card.green .stat-value {{ color: var(--accent); }}
   .stat-card.blue .stat-value {{ color: var(--accent2); }}
   .stat-card.warn .stat-value {{ color: var(--warn); }}
   .stat-card.danger .stat-value {{ color: var(--danger); }}
-
-  .stat-sub {{
-    font-size: 12px;
-    color: var(--muted);
-  }}
-
-  /* SECTIONS */
+  .stat-card.purple .stat-value {{ color: #a855f7; }}
+  .stat-card.teal .stat-value {{ color: #14b8a6; }}
+  .stat-sub {{ font-size: 12px; color: var(--muted); }}
   .section {{
     background: var(--bg2);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    margin-bottom: 24px;
-    overflow: hidden;
+    border-radius: 16px; margin-bottom: 24px; overflow: hidden;
   }}
-
   .section-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 18px 24px;
-    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
     background: var(--bg3);
   }}
-
   .section-title {{
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 2px;
+    font-size: 14px; font-weight: 700; letter-spacing: 2px;
     text-transform: uppercase;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    display: flex; align-items: center; gap: 10px;
   }}
-
-  .section-title .dot {{
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
+  .dot {{
+    width: 8px; height: 8px; border-radius: 50%;
   }}
-
   .dot-green {{ background: var(--accent); box-shadow: 0 0 8px var(--accent); }}
   .dot-blue {{ background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }}
   .dot-warn {{ background: var(--warn); box-shadow: 0 0 8px var(--warn); }}
-
   .badge {{
     font-family: 'Share Tech Mono', monospace;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    letter-spacing: 1px;
+    font-size: 11px; padding: 4px 10px;
+    border-radius: 6px; letter-spacing: 1px;
   }}
-
   .badge-green {{ background: rgba(0,245,196,0.1); color: var(--accent); border: 1px solid rgba(0,245,196,0.2); }}
   .badge-blue {{ background: rgba(0,153,255,0.1); color: var(--accent2); border: 1px solid rgba(0,153,255,0.2); }}
   .badge-warn {{ background: rgba(255,170,0,0.1); color: var(--warn); border: 1px solid rgba(255,170,0,0.2); }}
-
-  /* TABLE */
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-  }}
-
+  table {{ width: 100%; border-collapse: collapse; }}
   th {{
     font-family: 'Share Tech Mono', monospace;
-    font-size: 10px;
-    letter-spacing: 2px;
-    color: var(--muted);
-    text-transform: uppercase;
-    padding: 12px 24px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    background: rgba(0,0,0,0.2);
+    font-size: 10px; letter-spacing: 2px; color: var(--muted);
+    text-transform: uppercase; padding: 12px 16px; text-align: left;
+    border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.2);
   }}
-
   td {{
-    padding: 12px 24px;
-    font-size: 14px;
-    border-bottom: 1px solid rgba(26,42,64,0.5);
-    font-weight: 500;
+    padding: 12px 16px; font-size: 13px;
+    border-bottom: 1px solid rgba(26,42,64,0.5); font-weight: 500;
   }}
-
   tr:last-child td {{ border-bottom: none; }}
-
   tr:hover td {{ background: rgba(0,245,196,0.02); }}
-
   .long-badge {{
     display: inline-block;
-    background: rgba(0,245,196,0.1);
-    color: var(--accent);
+    background: rgba(0,245,196,0.1); color: var(--accent);
     border: 1px solid rgba(0,245,196,0.3);
-    border-radius: 6px;
-    padding: 2px 10px;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 1px;
+    border-radius: 6px; padding: 2px 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
   }}
-
   .short-badge {{
     display: inline-block;
-    background: rgba(255,59,107,0.1);
-    color: var(--danger);
+    background: rgba(255,59,107,0.1); color: var(--danger);
     border: 1px solid rgba(255,59,107,0.3);
-    border-radius: 6px;
-    padding: 2px 10px;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 1px;
+    border-radius: 6px; padding: 2px 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
   }}
-
-  .score-bar {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }}
-
+  .score-bar {{ display: flex; align-items: center; gap: 8px; }}
   .score-track {{
-    flex: 1;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-    overflow: hidden;
-    max-width: 80px;
+    flex: 1; height: 4px; background: var(--border);
+    border-radius: 2px; overflow: hidden; max-width: 60px;
   }}
-
   .score-fill {{
-    height: 100%;
-    border-radius: 2px;
+    height: 100%; border-radius: 2px;
     background: linear-gradient(90deg, var(--accent2), var(--accent));
   }}
-
   .score-num {{
     font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
-    color: var(--accent);
-    min-width: 30px;
+    font-size: 12px; color: var(--accent); min-width: 28px;
   }}
-
-  .mono {{
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
-  }}
-
+  .mono {{ font-family: 'Share Tech Mono', monospace; font-size: 12px; }}
   .text-muted {{ color: var(--muted); }}
   .text-accent {{ color: var(--accent); }}
   .text-blue {{ color: var(--accent2); }}
   .text-warn {{ color: var(--warn); }}
   .text-danger {{ color: var(--danger); }}
-
-  /* DAILY CHART */
+  .text-purple {{ color: #a855f7; }}
   .daily-grid {{
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 12px;
-    padding: 24px;
+    display: grid; grid-template-columns: repeat(7, 1fr);
+    gap: 12px; padding: 24px;
   }}
-
   .day-card {{
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px;
-    text-align: center;
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; text-align: center;
   }}
-
-  .day-label {{
-    font-size: 11px;
-    color: var(--muted);
-    margin-bottom: 8px;
-    letter-spacing: 1px;
-  }}
-
-  .day-count {{
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--accent);
-  }}
-
-  .day-bar {{
-    margin-top: 8px;
-    height: 3px;
-    background: var(--border);
-    border-radius: 2px;
-    overflow: hidden;
-  }}
-
-  .day-bar-fill {{
-    height: 100%;
-    background: linear-gradient(90deg, var(--accent2), var(--accent));
-    border-radius: 2px;
-  }}
-
-  /* EMPTY STATE */
+  .day-label {{ font-size: 11px; color: var(--muted); margin-bottom: 8px; letter-spacing: 1px; }}
+  .day-count {{ font-size: 28px; font-weight: 700; color: var(--accent); }}
+  .day-bar {{ margin-top: 8px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }}
+  .day-bar-fill {{ height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 2px; }}
   .empty {{
-    padding: 40px;
-    text-align: center;
-    color: var(--muted);
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
-    letter-spacing: 1px;
+    padding: 40px; text-align: center; color: var(--muted);
+    font-family: 'Share Tech Mono', monospace; font-size: 13px; letter-spacing: 1px;
   }}
-
-  /* FOOTER */
+  .trend-bull {{ color: var(--accent); font-weight: 700; }}
+  .trend-bear {{ color: var(--danger); font-weight: 700; }}
+  .trend-neutral {{ color: var(--warn); font-weight: 700; }}
+  .div-bull {{ color: var(--accent); }}
+  .div-bear {{ color: var(--danger); }}
   .footer {{
-    text-align: center;
-    padding: 20px;
+    text-align: center; padding: 20px;
     font-family: 'Share Tech Mono', monospace;
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 2px;
-    border-top: 1px solid var(--border);
-    margin-top: 20px;
+    font-size: 11px; color: var(--muted); letter-spacing: 2px;
+    border-top: 1px solid var(--border); margin-top: 20px;
   }}
-
   @media (max-width: 768px) {{
-    .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
+    .stats-grid {{ grid-template-columns: repeat(3, 1fr); }}
     .daily-grid {{ grid-template-columns: repeat(3, 1fr); }}
-    td, th {{ padding: 10px 14px; }}
+    td, th {{ padding: 8px 10px; }}
   }}
 </style>
 </head>
@@ -489,7 +328,7 @@ def dashboard():
       <div class="logo-icon">🤖</div>
       <div>
         <div class="logo-text">MUESA</div>
-        <div class="logo-sub">AI-POWERED CRYPTO TRADING SYSTEM</div>
+        <div class="logo-sub">AI-POWERED CRYPTO TRADING SYSTEM v2.0</div>
       </div>
     </div>
     <div class="header-right">
@@ -514,13 +353,23 @@ def dashboard():
       <div class="stat-sub">All time</div>
     </div>
     <div class="stat-card warn">
-      <div class="stat-label">Signals Skipped</div>
+      <div class="stat-label">Skipped</div>
       <div class="stat-value">{total_ghosts}</div>
       <div class="stat-sub">Ghost trades</div>
     </div>
+    <div class="stat-card purple">
+      <div class="stat-label">Longs</div>
+      <div class="stat-value">{total_longs}</div>
+      <div class="stat-sub">Buy trades</div>
+    </div>
     <div class="stat-card danger">
+      <div class="stat-label">Shorts</div>
+      <div class="stat-value">{total_shorts}</div>
+      <div class="stat-sub">Sell trades</div>
+    </div>
+    <div class="stat-card teal">
       <div class="stat-label">Model</div>
-      <div class="stat-value" style="font-size:16px; padding-top:8px;">HAIKU</div>
+      <div class="stat-value" style="font-size:14px; padding-top:6px;">HAIKU</div>
       <div class="stat-sub">claude-haiku-4-5</div>
     </div>
   </div>
@@ -547,7 +396,7 @@ def dashboard():
       </div>"""
 
     if not stats:
-        html += '<div style="padding:20px; color:var(--muted); text-align:center; grid-column:span 7; font-family:monospace;">NO DATA YET</div>'
+        html += '<div style="padding:20px;color:var(--muted);text-align:center;grid-column:span 7;font-family:monospace;">NO DATA YET</div>'
 
     html += """
     </div>
@@ -570,17 +419,33 @@ def dashboard():
         <tr>
           <th>Time</th>
           <th>Symbol</th>
-          <th>Direction</th>
+          <th>Side</th>
           <th>Entry</th>
-          <th>Stop Loss</th>
-          <th>Take Profit</th>
+          <th>SL</th>
+          <th>TP1</th>
+          <th>TP2</th>
           <th>Score</th>
+          <th>Support</th>
+          <th>Resistance</th>
+          <th>Divergence</th>
+          <th>Trend</th>
         </tr>
       </thead>
       <tbody>"""
         for trade in trades:
             side_badge = f'<span class="long-badge">LONG</span>' if trade[3] == 'LONG' else f'<span class="short-badge">SHORT</span>'
-            score_pct = min(trade[7], 100) if trade[7] else 0
+            score_pct = min(trade[8], 100) if trade[8] else 0
+
+            # Divergence color
+            div = trade[11] if len(trade) > 11 else None
+            div_class = 'div-bull' if div == 'BULLISH' else ('div-bear' if div == 'BEARISH' else 'text-muted')
+            div_text = div if div else '—'
+
+            # Trend color
+            trend = trade[12] if len(trade) > 12 else None
+            trend_class = 'trend-bull' if trend == 'BULLISH' else ('trend-bear' if trend == 'BEARISH' else 'trend-neutral')
+            trend_text = trend if trend else '—'
+
             html += f"""
         <tr>
           <td class="mono text-muted">{trade[1]}</td>
@@ -589,16 +454,21 @@ def dashboard():
           <td class="mono">{trade[4]}</td>
           <td class="mono text-danger">{trade[5]}</td>
           <td class="mono text-accent">{trade[6]}</td>
+          <td class="mono text-blue">{trade[7]}</td>
           <td>
             <div class="score-bar">
               <div class="score-track"><div class="score-fill" style="width:{score_pct}%"></div></div>
-              <span class="score-num">{trade[7]}</span>
+              <span class="score-num">{trade[8]}</span>
             </div>
           </td>
+          <td class="mono text-muted">{trade[9] if len(trade) > 9 and trade[9] else '—'}</td>
+          <td class="mono text-muted">{trade[10] if len(trade) > 10 and trade[10] else '—'}</td>
+          <td class="{div_class}">{div_text}</td>
+          <td class="{trend_class}">{trend_text}</td>
         </tr>"""
         html += "</tbody></table>"
     else:
-        html += '<div class="empty">// NO TRADES EXECUTED YET —  MUESA IS HUNTING...</div>'
+        html += '<div class="empty">// NO TRADES EXECUTED YET — MUESA IS HUNTING...</div>'
 
     html += "</div>"
 
@@ -641,7 +511,7 @@ def dashboard():
 
     html += f"""
   <div class="footer">
-    MUESA v2.0 &nbsp;|&nbsp; BINANCE PERPETUAL FUTURES &nbsp;|&nbsp; 5X LEVERAGE &nbsp;|&nbsp; AUTO-REFRESH 30s
+    MUESA v2.0 &nbsp;|&nbsp; BINANCE PERPETUAL FUTURES &nbsp;|&nbsp; 5X LEVERAGE &nbsp;|&nbsp; 25% ALLOCATION &nbsp;|&nbsp; AUTO-REFRESH 30s
   </div>
 
 </div>
