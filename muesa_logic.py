@@ -78,6 +78,169 @@ def is_false_recovery(df):
         pass
     return False
 
+# ─── PATTERN: BULL FLAG (LONG) ────────────────────────────────────────────────
+def detect_bull_flag(df):
+    """
+    Bull Flag: strong 10%+ rally over last 30 candles, followed by at least
+    10 candles of tight consolidation, then a breakout above the consolidation
+    high on 1.5x+ volume. EMA7 > EMA25 and price above both required.
+    Returns True if pattern is detected.
+    """
+    try:
+        if len(df) < 40:
+            return False
+
+        closes = df['close'].tolist()
+        volumes = df['volume'].tolist()
+
+        # Pole: 10%+ rally in the 30 candles before the last 10
+        pole_window = closes[-40:-10]
+        pole_low = min(pole_window)
+        pole_high = max(pole_window)
+        if pole_low <= 0:
+            return False
+        pole_gain = (pole_high - pole_low) / pole_low
+        if pole_gain < 0.10:
+            return False
+
+        # Consolidation: last 10 candles form a tight range (< 5% spread)
+        consol_closes = closes[-10:]
+        consol_high = max(consol_closes)
+        consol_low = min(consol_closes)
+        if consol_low <= 0:
+            return False
+        consol_range = (consol_high - consol_low) / consol_low
+        if consol_range >= 0.05:
+            return False
+
+        # Breakout: current close above consolidation high
+        current_close = closes[-1]
+        if current_close <= consol_high:
+            return False
+
+        # Volume spike on breakout candle (1.5x average of prior 20 candles)
+        avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0
+        if avg_vol <= 0 or volumes[-1] < avg_vol * 1.5:
+            return False
+
+        # EMA alignment: EMA7 > EMA25, price above both
+        ema7 = df['close'].ewm(span=7).mean().iloc[-1]
+        ema25 = df['close'].ewm(span=25).mean().iloc[-1]
+        if not (ema7 > ema25 and current_close > ema7 and current_close > ema25):
+            return False
+
+        return True
+    except:
+        pass
+    return False
+
+# ─── PATTERN: DEATH CROSS (SHORT) ────────────────────────────────────────────
+def detect_death_cross(df):
+    """
+    Death Cross: EMA7 crosses below EMA25 within the last 5 candles,
+    EMA25 is below EMA99 (bearish macro structure), RSI > 60 (overbought
+    into the cross), and volume is increasing on the down move.
+    Returns True if pattern is detected.
+    """
+    try:
+        if len(df) < 105:
+            return False
+
+        ema7_series = df['close'].ewm(span=7).mean()
+        ema25_series = df['close'].ewm(span=25).mean()
+        ema99_series = df['close'].ewm(span=99).mean()
+
+        # EMA7 must currently be below EMA25
+        if ema7_series.iloc[-1] >= ema25_series.iloc[-1]:
+            return False
+
+        # Cross must have occurred within the last 5 candles
+        crossed = False
+        for i in range(2, 7):
+            if ema7_series.iloc[-i] >= ema25_series.iloc[-i]:
+                crossed = True
+                break
+        if not crossed:
+            return False
+
+        # Bearish macro: EMA25 below EMA99
+        if ema25_series.iloc[-1] >= ema99_series.iloc[-1]:
+            return False
+
+        # RSI overbought at the cross (> 60)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / (loss + 1e-9)
+        rsi_series = 100 - (100 / (1 + rs))
+        if rsi_series.iloc[-1] <= 60:
+            return False
+
+        # Volume increasing on down move: last candle volume > prior 3-candle average
+        avg_vol_prior = df['volume'].iloc[-4:-1].mean()
+        if avg_vol_prior <= 0 or df['volume'].iloc[-1] <= avg_vol_prior:
+            return False
+
+        return True
+    except:
+        pass
+    return False
+
+# ─── PATTERN: VOLUME BREAKOUT (LONG) ─────────────────────────────────────────
+def detect_volume_breakout(df):
+    """
+    Volume Breakout: price consolidates in a low-volatility range for 10+
+    candles (< 4% spread), then breaks above the consolidation high on a
+    2x+ volume spike. EMA7 > EMA25 and RSI < 70 (not yet overbought).
+    Returns True if pattern is detected.
+    """
+    try:
+        if len(df) < 15:
+            return False
+
+        closes = df['close'].tolist()
+        volumes = df['volume'].tolist()
+
+        # Consolidation zone: candles [-11:-1] (10 candles before the current)
+        consol_closes = closes[-11:-1]
+        consol_high = max(consol_closes)
+        consol_low = min(consol_closes)
+        if consol_low <= 0:
+            return False
+        consol_range = (consol_high - consol_low) / consol_low
+        if consol_range >= 0.04:
+            return False
+
+        # Breakout: current close above consolidation high
+        current_close = closes[-1]
+        if current_close <= consol_high:
+            return False
+
+        # Volume spike: current candle volume >= 2x average of consolidation candles
+        avg_consol_vol = sum(volumes[-11:-1]) / 10
+        if avg_consol_vol <= 0 or volumes[-1] < avg_consol_vol * 2.0:
+            return False
+
+        # EMA alignment: EMA7 > EMA25
+        ema7 = df['close'].ewm(span=7).mean().iloc[-1]
+        ema25 = df['close'].ewm(span=25).mean().iloc[-1]
+        if ema7 <= ema25:
+            return False
+
+        # RSI not overbought (< 70)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / (loss + 1e-9)
+        rsi_series = 100 - (100 / (1 + rs))
+        if rsi_series.iloc[-1] >= 70:
+            return False
+
+        return True
+    except:
+        pass
+    return False
+
 # ─── ATR BASED SL/TP ──────────────────────────────────────────────────────────
 def get_sl_tp(df, direction, entry_price):
     high_low = df['high'] - df['low']
@@ -145,6 +308,30 @@ def calculate_math_score(df):
     if is_false_recovery(df):
         score -= 30
         print(f"⚠️ Pattern 14 detected — False Recovery penalty applied")
+
+    # Bull Flag bonus (+20, LONG)
+    bull_flag = detect_bull_flag(df)
+    if bull_flag:
+        score += 20
+        print(f"🚩 Bull Flag detected — +20 bonus applied (LONG setup)")
+    else:
+        print(f"🚩 Bull Flag: not detected")
+
+    # Death Cross bonus (+20, SHORT)
+    death_cross = detect_death_cross(df)
+    if death_cross:
+        score += 20
+        print(f"💀 Death Cross detected — +20 bonus applied (SHORT setup)")
+    else:
+        print(f"💀 Death Cross: not detected")
+
+    # Volume Breakout bonus (+15, LONG)
+    vol_breakout = detect_volume_breakout(df)
+    if vol_breakout:
+        score += 15
+        print(f"📈 Volume Breakout detected — +15 bonus applied (LONG setup)")
+    else:
+        print(f"📈 Volume Breakout: not detected")
 
     return score, direction, rvol, rsi
 
