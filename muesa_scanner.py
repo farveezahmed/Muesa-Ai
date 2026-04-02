@@ -7,16 +7,16 @@ from datetime import datetime, timedelta
 from muesa_logic import (
     init_db, can_take_trade, is_on_cooldown, passes_volume_filter,
     calculate_math_score, call_claude_ai, get_sl_tp, log_ghost_trade,
-    increment_trade_count
+    increment_trade_count, MIN_VOLUME_USDT
 )
-from muesa_telegram import system_alert, weekly_analysis
+from muesa_telegram import system_alert, weekly_analysis, daily_summary
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 CLAUDE_CALL_THRESHOLD = 60
 FINAL_TRADE_THRESHOLD = 75
-SCAN_INTERVAL = 900       # 15 minutes
-CACHE_TTL = 300           # Cache candles for 5 minutes
-COIN_ANALYSIS_DELAY = 0.5 # Seconds between coins
+CACHE_TTL = 60            # 1 minute cache
+COIN_ANALYSIS_DELAY = 0.3 # Seconds between coins
+MAX_COINS_TO_SCAN = 100   # Top 100 by volume only
 
 # ─── CANDLE CACHE ─────────────────────────────────────────────────────────────
 _candle_cache: dict = {}
@@ -32,6 +32,19 @@ def _fetch_ohlcv_cached(exchange, symbol: str, timeframe: str, limit: int) -> li
     candles = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     _candle_cache[cache_key] = (candles, now)
     return candles
+
+# ─── WAIT FOR CANDLE CLOSE ────────────────────────────────────────────────────
+def seconds_until_next_15m_close():
+    now = datetime.utcnow()
+    minutes = now.minute
+    seconds = now.second
+    next_boundary = ((minutes // 15) + 1) * 15
+    if next_boundary >= 60:
+        minutes_to_wait = 60 - minutes
+    else:
+        minutes_to_wait = next_boundary - minutes
+    total_seconds = (minutes_to_wait * 60) - seconds + 5
+    return total_seconds
 
 # ─── EMA CHECKS ───────────────────────────────────────────────────────────────
 def check_1d_ema(exchange, symbol, direction):
@@ -79,15 +92,11 @@ def get_15m_candles(exchange, symbol):
 # ─── ANALYSE COIN ─────────────────────────────────────────────────────────────
 async def analyse_coin(exchange, symbol, volume_usdt):
     try:
-        # Filter 1 — Volume
-        if not passes_volume_filter(volume_usdt):
-            return
-
-        # Filter 2 — Cooldown
+        # Filter 1 — Cooldown
         if is_on_cooldown(symbol):
             return
 
-        # Filter 3 — Max trades
+        # Filter 2 — Max trades
         if not can_take_trade():
             print("🛑 Max 5 trades reached for today")
             return
@@ -118,13 +127,13 @@ async def analyse_coin(exchange, symbol, volume_usdt):
             log_ghost_trade(symbol, score, "Below 60 threshold")
             return
 
-        # Filter 4 — 1D EMA block
+        # Filter 3 — 1D EMA block
         if not check_1d_ema(exchange, symbol, direction):
             print(f"🚫 {symbol} blocked by 1D EMA filter")
             log_ghost_trade(symbol, score, "1D EMA block")
             return
 
-        # Filter 5 — 4H and 1H EMA
+        # Filter 4 — 4H and 1H EMA
         if not check_4h_1h_ema(exchange, symbol, direction):
             print(f"🚫 {symbol} blocked by 4H/1H EMA filter")
             log_ghost_trade(symbol, score, "4H/1H EMA block")
@@ -164,7 +173,7 @@ async def analyse_coin(exchange, symbol, volume_usdt):
 # ─── MAIN SCANNER LOOP ────────────────────────────────────────────────────────
 async def scan_market_live():
     init_db()
-    system_alert("🚀 MUESA Scanner Started!")
+    print("🚀 MUESA Scanner Started!")
 
     # REST exchange
     exchange = ccxt.binance({
@@ -174,12 +183,10 @@ async def scan_market_live():
         'options': {'defaultType': 'future'}
     })
 
-    print("🚀 MUESA WEBSOCKET ENGINE ONLINE")
+    print("🚀 MUESA ENGINE ONLINE")
 
-    # Weekly report tracker
+    # Trackers
     last_weekly_report = datetime.utcnow().date()
-
-    # Daily summary tracker
     last_daily_summary = datetime.utcnow().date()
 
     try:
@@ -193,11 +200,10 @@ async def scan_market_live():
                 weekly_analysis()
                 last_weekly_report = today
 
-            # ── Daily summary — every day at midnight UTC ─────────────────────
+            # ── Daily summary — every midnight UTC ───────────────────────────
             if today != last_daily_summary:
-                from muesa_telegram import daily_summary
-                import sqlite3
                 try:
+                    import sqlite3
                     conn = sqlite3.connect('muesa_data.db')
                     c = conn.cursor()
                     yesterday = str(last_daily_summary)
@@ -214,21 +220,42 @@ async def scan_market_live():
                     print(f"Daily summary error: {e}")
                 last_daily_summary = today
 
-            print(f"\n🔍 MUESA Scanning Market... [{now.strftime('%H:%M:%S UTC')}]")
+            # ── Wait for next 15m candle close ────────────────────────────────
+            wait_seconds = seconds_until_next_15m_close()
+            print(f"\n⏳ Next candle close in {wait_seconds:.0f}s [{now.strftime('%H:%M:%S UTC')}]")
+            await asyncio.sleep(wait_seconds)
 
-            # Fetch all tickers via REST
+            # ── Scan top coins by volume ──────────────────────────────────────
+            scan_time = datetime.utcnow()
+            print(f"\n🔍 MUESA Scanning at candle close [{scan_time.strftime('%H:%M:%S UTC')}]")
+
+            # Clear cache for fresh data
+            _candle_cache.clear()
+
+            # Fetch all tickers
             tickers = exchange.fetch_tickers()
-            print(f"📡 Found {len(tickers)} symbols to scan")
 
-            for symbol, data in tickers.items():
-                if not symbol.endswith('/USDT:USDT'):
-                    continue
-                volume_usdt = data.get('quoteVolume', 0)
+            # Filter by volume and sort — top 100 only
+            usdt_tickers = {
+                symbol: data for symbol, data in tickers.items()
+                if symbol.endswith('/USDT:USDT')
+                and float(data.get('quoteVolume', 0)) >= MIN_VOLUME_USDT
+            }
+
+            sorted_tickers = sorted(
+                usdt_tickers.items(),
+                key=lambda x: float(x[1].get('quoteVolume', 0)),
+                reverse=True
+            )[:MAX_COINS_TO_SCAN]
+
+            print(f"📡 Scanning top {len(sorted_tickers)} coins by volume")
+
+            for symbol, data in sorted_tickers:
+                volume_usdt = float(data.get('quoteVolume', 0))
                 await analyse_coin(exchange, symbol, volume_usdt)
                 await asyncio.sleep(COIN_ANALYSIS_DELAY)
 
-            print(f"✅ Scan complete! Resting {SCAN_INTERVAL//60} minutes...")
-            await asyncio.sleep(SCAN_INTERVAL)
+            print(f"✅ Scan complete!")
 
     except Exception as e:
         print(f"Scanner error: {e}")
