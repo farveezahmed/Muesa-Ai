@@ -14,9 +14,9 @@ from muesa_telegram import system_alert, weekly_analysis, daily_summary
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 CLAUDE_CALL_THRESHOLD = 60
 FINAL_TRADE_THRESHOLD = 75
-CACHE_TTL = 60            # 1 minute cache
-COIN_ANALYSIS_DELAY = 0.3 # Seconds between coins
-MAX_COINS_TO_SCAN = 100   # Top 100 by volume only
+CACHE_TTL = 60
+COIN_ANALYSIS_DELAY = 0.3
+MAX_COINS_TO_SCAN = 100
 
 # ─── CANDLE CACHE ─────────────────────────────────────────────────────────────
 _candle_cache: dict = {}
@@ -114,9 +114,10 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         except Exception as e:
             print(f"1h candle fetch error {symbol}: {e}")
 
-        # Math score
-        score, direction, rvol, rsi, support, resistance, divergence, trend = \
+        # Math score — now returns 9 values including entry_reasons
+        score, direction, rvol, rsi, support, resistance, divergence, trend, entry_reasons = \
             calculate_math_score(df, df_1h=df_1h)
+
         print(
             f"📊 {symbol} | Score: {score} | Direction: {direction} | "
             f"RSI: {rsi:.1f} | RVOL: {rvol:.2f} | Trend: {trend} | "
@@ -139,10 +140,10 @@ async def analyse_coin(exchange, symbol, volume_usdt):
             log_ghost_trade(symbol, score, "4H/1H EMA block")
             return
 
-        # Claude API call
+        # Claude API call — passes entry_reasons for better analysis
         loop = asyncio.get_event_loop()
         final_score = await loop.run_in_executor(
-            None, call_claude_ai, symbol, score, direction, rsi, rvol
+            None, call_claude_ai, symbol, score, direction, rsi, rvol, entry_reasons
         )
         print(f"🤖 {symbol} Final Score: {final_score}")
 
@@ -164,7 +165,8 @@ async def analyse_coin(exchange, symbol, volume_usdt):
         execute_trade(
             symbol, direction, entry_price, sl, tp1, tp2, final_score,
             support=support, resistance=resistance,
-            divergence=divergence, trend=trend
+            divergence=divergence, trend=trend,
+            entry_reasons=entry_reasons
         )
 
     except Exception as e:
@@ -175,7 +177,6 @@ async def scan_market_live():
     init_db()
     print("🚀 MUESA Scanner Started!")
 
-    # REST exchange
     exchange = ccxt.binance({
         'apiKey': os.getenv('BINANCE_API_KEY'),
         'secret': os.getenv('BINANCE_SECRET_KEY'),
@@ -185,13 +186,12 @@ async def scan_market_live():
 
     print("🚀 MUESA ENGINE ONLINE")
 
-    # Trackers
     last_weekly_report = datetime.utcnow().date()
     last_daily_summary = datetime.utcnow().date()
 
     try:
         while True:
-            now = datetime.utcnow()
+            now   = datetime.utcnow()
             today = now.date()
 
             # ── Weekly report — every Sunday ──────────────────────────────────
@@ -205,7 +205,7 @@ async def scan_market_live():
                 try:
                     import sqlite3
                     conn = sqlite3.connect('muesa_data.db')
-                    c = conn.cursor()
+                    c    = conn.cursor()
                     yesterday = str(last_daily_summary)
                     c.execute("SELECT count FROM daily_stats WHERE date=?", (yesterday,))
                     row = c.fetchone()
